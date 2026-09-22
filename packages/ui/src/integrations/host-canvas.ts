@@ -199,6 +199,52 @@ export function canvasDocumentFromProposalDto(
   };
 }
 
+/**
+ * Kahn's algorithm with ties broken by sorted step_id -- must match
+ * Orchestrator's `stable_topological_order` in
+ * `orchestrator-core/src/plan_edit_state.rs` exactly. That function is the
+ * sole authority `POST /v1/runs/{id}/plan-edits` checks `execution_order`
+ * against (`INVALID_INPUT: execution_order is not the stable topological
+ * order` on mismatch); it computes purely from `edges`, so `edges` must
+ * carry the same dependency information as each step's `depends_on`, and
+ * `execution_order` must be recomputed to match, not just echo whatever
+ * order the canvas nodes happen to be in.
+ */
+function stableTopologicalOrder(
+  stepIds: readonly string[],
+  edges: readonly { from: string; to: string }[],
+): string[] | null {
+  const adjacency = new Map<string, Set<string>>(
+    stepIds.map((id) => [id, new Set<string>()]),
+  );
+  const indegree = new Map<string, number>(stepIds.map((id) => [id, 0]));
+  for (const { from, to } of edges) {
+    if (!adjacency.has(from) || !indegree.has(to)) return null;
+    const targets = adjacency.get(from);
+    if (targets && !targets.has(to)) {
+      targets.add(to);
+      indegree.set(to, (indegree.get(to) ?? 0) + 1);
+    }
+  }
+  const ready = stepIds.filter((id) => indegree.get(id) === 0).sort();
+  const order: string[] = [];
+  while (ready.length > 0) {
+    const id = ready.shift();
+    if (id === undefined) break;
+    order.push(id);
+    const nexts = [...(adjacency.get(id) ?? [])].sort();
+    for (const next of nexts) {
+      const remaining = (indegree.get(next) ?? 0) - 1;
+      indegree.set(next, remaining);
+      if (remaining === 0) {
+        ready.push(next);
+        ready.sort();
+      }
+    }
+  }
+  return order.length === stepIds.length ? order : null;
+}
+
 /** Replace steps/execution_order from canvas nodes; never from DSL. */
 export function applyCanvasNodeEdits(
   canvas: HostCanvasDocument,
@@ -209,7 +255,8 @@ export function applyCanvasNodeEdits(
   }
   const plan: JsonObject = { ...(canvas.plan ?? {}) };
   const steps: JsonObject[] = [];
-  const order: string[] = [];
+  const stepIds: string[] = [];
+  const edges: { from: string; to: string }[] = [];
   for (const node of nodes) {
     const step: JsonObject = { ...(node.plan_step ?? {}) };
     step.step_id = node.id || step.step_id;
@@ -218,14 +265,27 @@ export function applyCanvasNodeEdits(
     if ('capabilities' in node) step.capabilities = node.capabilities;
     if ('depends_on' in node) step.depends_on = node.depends_on;
     steps.push(step);
-    order.push(String(step.step_id));
+    stepIds.push(String(step.step_id));
+    for (const dep of Array.isArray(node.depends_on) ? node.depends_on : []) {
+      if (typeof dep === 'string' && dep) {
+        edges.push({ from: dep, to: String(step.step_id) });
+      }
+    }
+  }
+  const order = stableTopologicalOrder(stepIds, edges);
+  if (!order) {
+    throw new HostCanvasError(
+      'INVALID_INPUT: edited plan graph contains a cycle or a dangling dependency',
+    );
   }
   plan.steps = steps;
+  plan.edges = edges;
   plan.execution_order = order;
   return {
     ...canvas,
     plan,
     nodes,
+    edges,
     execution_order: order,
   };
 }

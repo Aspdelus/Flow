@@ -79,6 +79,64 @@ describe('host canvas inject helpers', () => {
     ).toBe('step-002');
   });
 
+  it('derives edges from depends_on so the backend topological check agrees with execution_order', () => {
+    // Orchestrator's stable_topological_order (orchestrator-core/src/
+    // plan_edit_state.rs) computes purely from `edges`, not `depends_on` --
+    // a save that only set depends_on left edges empty, so the backend fell
+    // back to sorting bare step_ids and rejected any plan whose dependency
+    // order didn't already happen to match alphabetical order.
+    const canvas = canvasDocumentFromProposalDto(dto);
+    const stepA = {
+      id: 'step-b',
+      kind: 'host.plan-step.v1' as const,
+      agent_id: 'frontend-developer',
+      objective: 'first, alphabetically later id',
+      capabilities: ['read'],
+      depends_on: [],
+      plan_step: { step_id: 'step-b', depends_on: [] },
+    };
+    const stepB = {
+      id: 'step-a',
+      kind: 'host.plan-step.v1' as const,
+      agent_id: 'frontend-developer',
+      objective: 'depends on step-b despite sorting first alphabetically',
+      capabilities: ['read'],
+      depends_on: ['step-b'],
+      plan_step: { step_id: 'step-a', depends_on: ['step-b'] },
+    };
+    const updated = applyCanvasNodeEdits(canvas, [stepA, stepB]);
+    expect(updated.plan.edges).toEqual([{ from: 'step-b', to: 'step-a' }]);
+    // The stable order must put step-b before step-a (dependency), not
+    // 'step-a' before 'step-b' (alphabetical) -- confirming execution_order
+    // was recomputed from the graph, not copied from node iteration order.
+    expect(updated.execution_order).toEqual(['step-b', 'step-a']);
+  });
+
+  it('rejects a cyclic dependency graph instead of sending an inconsistent plan', () => {
+    const canvas = canvasDocumentFromProposalDto(dto);
+    const stepA = {
+      id: 'step-a',
+      kind: 'host.plan-step.v1' as const,
+      agent_id: 'frontend-developer',
+      objective: 'a',
+      capabilities: ['read'],
+      depends_on: ['step-b'],
+      plan_step: { step_id: 'step-a', depends_on: ['step-b'] },
+    };
+    const stepB = {
+      id: 'step-b',
+      kind: 'host.plan-step.v1' as const,
+      agent_id: 'frontend-developer',
+      objective: 'b',
+      capabilities: ['read'],
+      depends_on: ['step-a'],
+      plan_step: { step_id: 'step-b', depends_on: ['step-a'] },
+    };
+    expect(() => applyCanvasNodeEdits(canvas, [stepA, stepB])).toThrow(
+      HostCanvasError,
+    );
+  });
+
   it('refuses blank Playground exports as authority', () => {
     expect(() => refuseUninjectedPlayground({})).toThrow(HostCanvasError);
     expect(() => refuseUninjectedPlayground({ kind: 'app' })).toThrow(
