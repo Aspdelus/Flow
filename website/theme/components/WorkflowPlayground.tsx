@@ -263,6 +263,7 @@ function WorkflowPlaygroundSurface({
         .then((canvas) => {
           if (cancelled) return;
           setHostCanvas(canvas);
+          lastSavedPlanStepsRef.current = JSON.stringify(canvas.plan.steps);
           restore(graphFromHostCanvas(canvas, locale, catalog));
           // A reload re-reads the stored revision. Resetting to 1 here would
           // replay the host's cached same-revision response.
@@ -1080,48 +1081,78 @@ function WorkflowPlaygroundSurface({
     setAnnouncement(copy.graphExported);
   }, [copy.graphExported, example.id, graph, hostCanvas, hostMode]);
 
+  // Snapshot of `plan.steps` as they last existed on the host -- refreshed
+  // whenever the canvas is (re)loaded from the host or a save/approve
+  // round-trip completes. Deliberately NOT the same thing as `hostCanvas`:
+  // addHostStep/applyCopilotSteps mutate `hostCanvas` locally (so the
+  // canvas preview reflects them immediately) without ever POSTing to the
+  // host, so comparing against `hostCanvas` itself would never detect them
+  // as unsaved. This ref is the host's actual last-known state.
+  const lastSavedPlanStepsRef = useRef<string | null>(null);
+
+  // Whether the in-memory graph/canvas has plan-step edits that were never
+  // sent to the host -- a node's objective edited via the inspector, or a
+  // step added/Copilot-suggested but not yet saved. Approve must not
+  // silently ignore this: it only ever sends the host's last-saved
+  // `proposal_digest`/token, so an edit made after that save is otherwise
+  // dropped the moment Approve's post-resume refetch overwrites the local
+  // graph with the host's (unedited) copy.
+  const hostCanvasIsDirty = useCallback((): boolean => {
+    if (!hostCanvas) return false;
+    const next = hostCanvasFromGraph(hostCanvas, graph);
+    return JSON.stringify(next.plan.steps) !== lastSavedPlanStepsRef.current;
+  }, [graph, hostCanvas]);
+
+  // Core of "Save to host," extracted so approveOnHost can await it (and use
+  // its resulting canvas's fresh token/digest) before resuming the hook.
+  // Does not touch hostBusy -- callers own that so a save-then-approve chain
+  // shows one continuous busy state instead of a flicker in between.
+  const saveCanvasToHost = useCallback((): Promise<HostCanvasDocument> => {
+    if (!hostMode || !hostCanvas) {
+      return Promise.reject(new Error('host canvas not loaded'));
+    }
+    const client = createHostClient(hostMode);
+    const nextCanvas = hostCanvasFromGraph(hostCanvas, graph);
+    return client.saveCanvas(nextCanvas, editRevision).then((result) => {
+      const decision = (result.json.decision ?? {}) as {
+        status?: string;
+        message?: string;
+      };
+      const proposal = result.json.proposal;
+      let savedCanvas = nextCanvas;
+      if (proposal && typeof proposal === 'object') {
+        savedCanvas = refreshCanvasFromProposalDto(proposal);
+        setHostCanvas(savedCanvas);
+        restore(graphFromHostCanvas(savedCanvas, locale, catalog));
+      } else {
+        setHostCanvas(nextCanvas);
+      }
+      lastSavedPlanStepsRef.current = JSON.stringify(savedCanvas.plan.steps);
+      setEditRevision((current) => {
+        if (!hostMode?.runId || typeof sessionStorage === 'undefined') {
+          return current >= 1 ? Math.floor(current) + 1 : 1;
+        }
+        return advanceHostEditRevision(sessionStorage, hostMode.runId, current);
+      });
+      setAnnouncement(
+        `${decision.status ?? result.status}${
+          decision.message ? `: ${decision.message}` : ''
+        }`,
+      );
+      return savedCanvas;
+    });
+  }, [catalog, editRevision, graph, hostCanvas, hostMode, locale, restore]);
+
   const saveToHost = useCallback(() => {
     if (!hostMode || !hostCanvas) return;
     if (!hostRunEditActions(hostCanvas).save) return;
     setHostBusy(true);
-    const client = createHostClient(hostMode);
-    const nextCanvas = hostCanvasFromGraph(hostCanvas, graph);
-    void client
-      .saveCanvas(nextCanvas, editRevision)
-      .then((result) => {
-        const decision = (result.json.decision ?? {}) as {
-          status?: string;
-          message?: string;
-        };
-        const proposal = result.json.proposal;
-        if (proposal && typeof proposal === 'object') {
-          const refreshed = refreshCanvasFromProposalDto(proposal);
-          setHostCanvas(refreshed);
-          restore(graphFromHostCanvas(refreshed, locale, catalog));
-        } else {
-          setHostCanvas(nextCanvas);
-        }
-        setEditRevision((current) => {
-          if (!hostMode?.runId || typeof sessionStorage === 'undefined') {
-            return current >= 1 ? Math.floor(current) + 1 : 1;
-          }
-          return advanceHostEditRevision(
-            sessionStorage,
-            hostMode.runId,
-            current,
-          );
-        });
-        setAnnouncement(
-          `${decision.status ?? result.status}${
-            decision.message ? `: ${decision.message}` : ''
-          }`,
-        );
-      })
+    void saveCanvasToHost()
       .catch((error: unknown) => {
         setAnnouncement(error instanceof Error ? error.message : String(error));
       })
       .finally(() => setHostBusy(false));
-  }, [catalog, editRevision, graph, hostCanvas, hostMode, locale, restore]);
+  }, [hostCanvas, hostMode, saveCanvasToHost]);
 
   const selectHostRun = useCallback(
     (runId: string) => {
@@ -1168,31 +1199,39 @@ function WorkflowPlaygroundSurface({
   const approveOnHost = useCallback(() => {
     if (!hostMode || !hostCanvas) return;
     if (!hostRunEditActions(hostCanvas).approve) return;
-    const token =
-      typeof hostCanvas.approval.token === 'string'
-        ? hostCanvas.approval.token
-        : '';
-    const digest =
-      typeof hostCanvas.proposal_digest === 'string'
-        ? hostCanvas.proposal_digest
-        : '';
-    if (!token || !digest) {
-      setAnnouncement(
-        locale === 'zh'
-          ? '缺少 approval token 或 proposal_digest'
-          : 'Missing approval token or proposal_digest',
-      );
-      return;
-    }
     setHostBusy(true);
+    // Approve only ever acts on the host's own record of the plan (its
+    // token/digest), not on whatever the operator has drawn locally. Flush
+    // any unsaved node edits first so Approve can't silently discard them --
+    // see hostCanvasIsDirty's doc comment.
+    const prepared = hostCanvasIsDirty()
+      ? saveCanvasToHost()
+      : Promise.resolve(hostCanvas);
     const client = createHostClient(hostMode);
-    void issueApprovalRecord({
-      proposalDigest: digest,
-      tenantId: hostMode.tenantId,
-      principalRef: hostMode.principalRef,
-      approved: true,
-    })
-      .then((record) => client.resumeHook(token, record))
+    void prepared
+      .then((current) => {
+        const token =
+          typeof current.approval.token === 'string'
+            ? current.approval.token
+            : '';
+        const digest =
+          typeof current.proposal_digest === 'string'
+            ? current.proposal_digest
+            : '';
+        if (!token || !digest) {
+          throw new Error(
+            locale === 'zh'
+              ? '缺少 approval token 或 proposal_digest'
+              : 'Missing approval token or proposal_digest',
+          );
+        }
+        return issueApprovalRecord({
+          proposalDigest: digest,
+          tenantId: hostMode.tenantId,
+          principalRef: hostMode.principalRef,
+          approved: true,
+        }).then((record) => client.resumeHook(token, record));
+      })
       .then((snapshot) => {
         const status =
           snapshot && typeof snapshot === 'object' && 'status' in snapshot
@@ -1211,6 +1250,7 @@ function WorkflowPlaygroundSurface({
         return client.getProposal(hostMode.runId).then((proposal) => {
           const refreshed = refreshCanvasFromProposalDto(proposal);
           setHostCanvas(refreshed);
+          lastSavedPlanStepsRef.current = JSON.stringify(refreshed.plan.steps);
           restore(graphFromHostCanvas(refreshed, locale, catalog));
         });
       })
@@ -1218,7 +1258,15 @@ function WorkflowPlaygroundSurface({
         setAnnouncement(error instanceof Error ? error.message : String(error));
       })
       .finally(() => setHostBusy(false));
-  }, [catalog, hostCanvas, hostMode, locale, restore]);
+  }, [
+    catalog,
+    hostCanvas,
+    hostCanvasIsDirty,
+    hostMode,
+    locale,
+    restore,
+    saveCanvasToHost,
+  ]);
 
   const addHostStep = useCallback(() => {
     if (!hostMode || !hostCanvas) return;
