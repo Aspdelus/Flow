@@ -450,7 +450,7 @@ function WorkflowPlaygroundSurface({
     if (!announcement) return;
     const timeout = window.setTimeout(() => {
       setAnnouncement((current) => (current === announcement ? '' : current));
-    }, 2400);
+    }, 10000);
     return () => window.clearTimeout(timeout);
   }, [announcement]);
 
