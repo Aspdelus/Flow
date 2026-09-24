@@ -23,6 +23,7 @@ import {
   withHostModeParams,
 } from './WorkflowPlayground.host';
 import { createPlaygroundNodeCatalog } from './WorkflowPlayground.custom-nodes';
+import { createPlaygroundEdge } from './WorkflowPlayground.model';
 
 const HOST_PREVIEW_TYPE = 'host.preview.step';
 
@@ -352,6 +353,258 @@ describe('WorkflowPlayground host mode', () => {
       step_id: 'step-002',
       objective: 'Copilot-added follow-up performance pass',
     });
+  });
+
+  it('graphFromHostCanvas renders a fan-out/fan-in plan as a DAG, not a straight chain', () => {
+    // step-a has no dependency (fans out from start); step-b and step-c both
+    // depend only on step-a (fan-out); step-d depends on BOTH step-b and
+    // step-c (fan-in). Array order deliberately does not match dependency
+    // order, so a chain-by-index implementation would get this wrong.
+    const catalog = hostCatalog();
+    const canvas = canvasDocumentFromProposalDto({
+      schema_version: 'host.flow-http-proposal.v1',
+      run_id: 'run-parallel',
+      proposal_digest: 'sha256:parallel',
+      execution_digest: 'deadbeef',
+      approval_hook_waiting: true,
+      approval_token: 'tok',
+      proposal: {
+        plan: {
+          schema_version: 'host.agent-plan.v2',
+          steps: [
+            {
+              step_id: 'step-a',
+              agent_id: 'frontend-developer',
+              objective: 'first',
+              capabilities: ['read'],
+              depends_on: [],
+              version: '1.0.0',
+            },
+            {
+              step_id: 'step-d',
+              agent_id: 'frontend-developer',
+              objective: 'fan-in',
+              capabilities: ['read'],
+              depends_on: ['step-b', 'step-c'],
+              version: '1.0.0',
+            },
+            {
+              step_id: 'step-b',
+              agent_id: 'frontend-developer',
+              objective: 'branch one',
+              capabilities: ['read'],
+              depends_on: ['step-a'],
+              version: '1.0.0',
+            },
+            {
+              step_id: 'step-c',
+              agent_id: 'frontend-developer',
+              objective: 'branch two',
+              capabilities: ['read'],
+              depends_on: ['step-a'],
+              version: '1.0.0',
+            },
+          ],
+          edges: [],
+          execution_order: ['step-a', 'step-b', 'step-c', 'step-d'],
+        },
+      },
+    });
+    const graph = graphFromHostCanvas(canvas, 'en', catalog);
+
+    const edgesBetween = (source: string, target: string) =>
+      graph.edges.filter(
+        (edge) => edge.source === source && edge.target === target,
+      );
+    expect(edgesBetween('start', 'step-a')).toHaveLength(1);
+    // Fan-out: step-a has two independent outgoing edges, not one.
+    expect(edgesBetween('step-a', 'step-b')).toHaveLength(1);
+    expect(edgesBetween('step-a', 'step-c')).toHaveLength(1);
+    // Fan-in: step-d has two incoming edges from its two dependencies.
+    expect(edgesBetween('step-b', 'step-d')).toHaveLength(1);
+    expect(edgesBetween('step-c', 'step-d')).toHaveLength(1);
+    // step-d is the only leaf (nothing depends on it), so it alone feeds done.
+    expect(edgesBetween('step-d', 'done')).toHaveLength(1);
+    expect(edgesBetween('step-a', 'done')).toHaveLength(0);
+    expect(edgesBetween('step-b', 'done')).toHaveLength(0);
+    expect(edgesBetween('step-c', 'done')).toHaveLength(0);
+    expect(graph.edges).toHaveLength(6);
+
+    // The topological layout kernel places step-b and step-c (same depth)
+    // at the same x column, distinct from step-a's and step-d's columns --
+    // proof this isn't secretly still a single-row chain layout.
+    const posOf = (id: string) =>
+      graph.nodes.find((node) => node.id === id)?.position;
+    const posB = posOf('step-b');
+    const posC = posOf('step-c');
+    const posA = posOf('step-a');
+    const posD = posOf('step-d');
+    expect(posB).toBeDefined();
+    expect(posC).toBeDefined();
+    expect(posB?.x).toBe(posC?.x);
+    expect(posB?.y).not.toBe(posC?.y);
+    expect(posA?.x).toBeLessThan(posB?.x ?? Infinity);
+    expect(posD?.x).toBeGreaterThan(posB?.x ?? -Infinity);
+  });
+
+  it('hostCanvasFromGraph derives depends_on from the canvas edges, including fan-in, not from stale cached step data', () => {
+    const catalog = hostCatalog();
+    const canvas = canvasDocumentFromProposalDto({
+      schema_version: 'host.flow-http-proposal.v1',
+      run_id: 'run-roundtrip',
+      proposal_digest: 'sha256:roundtrip',
+      execution_digest: 'deadbeef',
+      approval_hook_waiting: true,
+      approval_token: 'tok',
+      proposal: {
+        plan: {
+          schema_version: 'host.agent-plan.v2',
+          steps: [
+            {
+              step_id: 'step-a',
+              agent_id: 'frontend-developer',
+              objective: 'first',
+              capabilities: ['read'],
+              depends_on: [],
+              version: '1.0.0',
+            },
+            {
+              step_id: 'step-b',
+              agent_id: 'frontend-developer',
+              objective: 'second',
+              capabilities: ['read'],
+              // Stale on purpose: this cached depends_on says step-b depends
+              // on nothing, but the canvas below draws an edge from step-a
+              // to step-b. hostCanvasFromGraph must trust the canvas edge,
+              // not this cached field.
+              depends_on: [],
+              version: '1.0.0',
+            },
+          ],
+          edges: [],
+          execution_order: ['step-a', 'step-b'],
+        },
+      },
+    });
+    const graph = graphFromHostCanvas(canvas, 'en', catalog);
+    // Simulate the operator hand-drawing a second incoming edge onto
+    // step-b's 'in' handle, in addition to whatever graphFromHostCanvas
+    // already produced -- a manual fan-in edit.
+    const manualEdge = createPlaygroundEdge(
+      { source: 'step-a', sourceHandle: 'success', target: 'step-b', targetHandle: 'in' },
+      graph.nodes,
+      'en',
+      catalog.registry,
+    );
+    const edited = {
+      ...graph,
+      edges: [...graph.edges.filter((edge) => edge.target !== 'step-b'), manualEdge],
+    };
+    const updated = hostCanvasFromGraph(canvas, edited);
+    expect(updated.plan.steps).toEqual([
+      expect.objectContaining({ step_id: 'step-a', depends_on: [] }),
+      expect.objectContaining({ step_id: 'step-b', depends_on: ['step-a'] }),
+    ]);
+  });
+
+  it('graphFromHostCanvas detects a same-step-count restructure and does not hide it behind a stale DSL projection', () => {
+    // The stale preview_only.flow_dsl is a linear chain (start -> step-a ->
+    // step-b -> step-c -> done) with 3 plan-step nodes, exactly matching the
+    // live AgentPlan's step count -- but the live plan itself has since been
+    // edited (e.g. via Copilot) into a fan-out/fan-in: step-b and step-c both
+    // depend only on step-a, with no edge between step-b and step-c. A count-
+    // only tie-break would wrongly prefer the stale linear-chain DSL here
+    // since 3 >= 3, silently hiding the restructure until the next Save.
+    const catalog = hostCatalog();
+    const canvas = canvasDocumentFromProposalDto({
+      schema_version: 'host.flow-http-proposal.v1',
+      run_id: 'run-restructure',
+      proposal_digest: 'sha256:restructure',
+      flow_dsl: {
+        version: '0.7.0',
+        kind: 'app',
+        app: { name: 'host.plan.demo', mode: 'workflow' },
+        dependencies: [],
+        workflow: {
+          graph: {
+            nodes: [
+              { id: 'start', data: { type: 'flow.start' } },
+              {
+                id: 'step-a',
+                data: { type: HOST_PREVIEW_TYPE, agent_id: 'frontend-developer', objective: 'first' },
+              },
+              {
+                id: 'step-b',
+                data: { type: HOST_PREVIEW_TYPE, agent_id: 'frontend-developer', objective: 'second (stale: was chained)' },
+              },
+              {
+                id: 'step-c',
+                data: { type: HOST_PREVIEW_TYPE, agent_id: 'frontend-developer', objective: 'third (stale: was chained)' },
+              },
+              { id: 'done', data: { type: 'flow.complete' } },
+            ],
+            edges: [
+              { id: 'e1', source: 'start', target: 'step-a' },
+              { id: 'e2', source: 'step-a', target: 'step-b' },
+              { id: 'e3', source: 'step-b', target: 'step-c' },
+              { id: 'e4', source: 'step-c', target: 'done' },
+            ],
+          },
+        },
+      },
+      execution_digest: 'stale-digest',
+      approval_hook_waiting: true,
+      approval_token: 'tok',
+      proposal: {
+        plan: {
+          schema_version: 'host.agent-plan.v2',
+          steps: [
+            {
+              step_id: 'step-a',
+              agent_id: 'frontend-developer',
+              objective: 'first',
+              capabilities: ['read'],
+              depends_on: [],
+              version: '1.0.0',
+            },
+            {
+              step_id: 'step-b',
+              agent_id: 'frontend-developer',
+              objective: 'second (restructured: fans out from step-a)',
+              capabilities: ['read'],
+              depends_on: ['step-a'],
+              version: '1.0.0',
+            },
+            {
+              step_id: 'step-c',
+              agent_id: 'frontend-developer',
+              objective: 'third (restructured: fans out from step-a)',
+              capabilities: ['read'],
+              depends_on: ['step-a'],
+              version: '1.0.0',
+            },
+          ],
+          edges: [],
+          execution_order: ['step-a', 'step-b', 'step-c'],
+        },
+      },
+    });
+    const graph = graphFromHostCanvas(canvas, 'en', catalog);
+
+    // Must reflect the live restructure (step-a fans out to both step-b and
+    // step-c), not the stale DSL's linear chain (step-a -> step-b -> step-c).
+    const edgesBetween = (source: string, target: string) =>
+      graph.edges.filter(
+        (edge) => edge.source === source && edge.target === target,
+      );
+    expect(edgesBetween('step-a', 'step-b')).toHaveLength(1);
+    expect(edgesBetween('step-a', 'step-c')).toHaveLength(1);
+    expect(edgesBetween('step-b', 'step-c')).toHaveLength(0);
+
+    const stepB = graph.nodes.find((node) => node.id === 'step-b');
+    const stepC = graph.nodes.find((node) => node.id === 'step-c');
+    expect(stepB?.data.dagNode.data.desc).toContain('restructured');
+    expect(stepC?.data.dagNode.data.desc).toContain('restructured');
   });
 
   it('mintRunId/mintApprovalToken produce distinct, non-empty values', () => {

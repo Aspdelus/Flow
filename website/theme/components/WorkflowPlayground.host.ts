@@ -15,6 +15,7 @@ import {
 } from '@a3s-lab/flow-ui';
 import type { FlowWebsiteLocale } from './flow-node-catalog';
 import type { WorkflowExampleDefinition } from './WorkflowPlayground.examples';
+import { layoutPlaygroundGraphInJavaScript } from './WorkflowPlayground.layout-kernel';
 import {
   createPlaygroundEdge,
   createPlaygroundNode,
@@ -390,6 +391,57 @@ export function graphFromHostFlowDsl(
   return { nodes, edges, annotations: [] };
 }
 
+/** Order-independent `step_id -> sorted depends_on` signature for a set of
+ * AgentPlan steps, restricted to dependencies that name another step in the
+ * same set (mirrors graphFromHostFlowDsl/hostCanvasFromGraph's own filtering
+ * of dangling/foreign dependency ids). */
+function planStepsDependencySignature(steps: JsonObject[]): string {
+  const stepIds = new Set(steps.map((step) => String(step.step_id ?? '')));
+  return steps
+    .map((step) => {
+      const stepId = String(step.step_id ?? '');
+      const dependsOn = Array.isArray(step.depends_on)
+        ? Array.from(
+            new Set(
+              step.depends_on.filter(
+                (dep): dep is string =>
+                  typeof dep === 'string' && stepIds.has(dep),
+              ),
+            ),
+          ).sort()
+        : [];
+      return `${stepId}<-${dependsOn.join(',')}`;
+    })
+    .sort()
+    .join('|');
+}
+
+/** Same signature shape as [[planStepsDependencySignature]], computed from a
+ * DSL-derived graph's own plan-step nodes and edges instead of `depends_on`
+ * arrays, so the two can be compared for structural equivalence. */
+function dslGraphDependencySignature(graph: PlaygroundGraphState): string {
+  const planStepIds = new Set(
+    graph.nodes
+      .filter((node) => node.data?.hostPlanStep)
+      .map((node) => node.id),
+  );
+  const dependsOnByStep = new Map<string, Set<string>>();
+  for (const stepId of planStepIds) dependsOnByStep.set(stepId, new Set());
+  for (const edge of graph.edges) {
+    const source = String(edge.source ?? '');
+    const target = String(edge.target ?? '');
+    if (!planStepIds.has(target) || !planStepIds.has(source)) continue;
+    dependsOnByStep.get(target)?.add(source);
+  }
+  return Array.from(planStepIds)
+    .map(
+      (stepId) =>
+        `${stepId}<-${Array.from(dependsOnByStep.get(stepId) ?? []).sort().join(',')}`,
+    )
+    .sort()
+    .join('|');
+}
+
 export function graphFromHostCanvas(
   canvas: HostCanvasDocument,
   locale: FlowWebsiteLocale,
@@ -407,7 +459,20 @@ export function graphFromHostCanvas(
       const dslPlanSteps = fromDsl.nodes.filter(
         (node) => node.data?.hostPlanStep,
       ).length;
-      if (dslPlanSteps >= planSteps.length) return fromDsl;
+      if (dslPlanSteps > planSteps.length) return fromDsl;
+      // Equal step counts don't rule out an unsaved structural edit -- e.g.
+      // Copilot or a hand-drawn edit can turn a linear chain into a fan-out/
+      // fan-in with the same number of steps. Only trust the (possibly
+      // stale) DSL projection when its dependency structure still matches
+      // the live AgentPlan steps; otherwise fall through to the plan
+      // projection below so the restructure isn't silently hidden.
+      if (
+        dslPlanSteps === planSteps.length &&
+        dslGraphDependencySignature(fromDsl) ===
+          planStepsDependencySignature(planSteps)
+      ) {
+        return fromDsl;
+      }
     }
   } catch {
     // Fall back to plan projection when DSL types are incomplete.
@@ -419,7 +484,7 @@ export function graphFromHostCanvas(
   const start = createPlaygroundNode(
     'start',
     'flow.start',
-    { x: 0, y: HOST_NODE_ROW_Y },
+    { x: 0, y: 0 },
     locale,
     {
       configuration: {
@@ -437,6 +502,9 @@ export function graphFromHostCanvas(
   const steps = Array.isArray(canvas.plan.steps)
     ? (canvas.plan.steps as JsonObject[])
     : [];
+  const stepIds = new Set(
+    steps.map((step, index) => String(step.step_id ?? `step-${index + 1}`)),
+  );
   steps.forEach((step, index) => {
     const stepId = String(step.step_id ?? `step-${index + 1}`);
     const objective =
@@ -445,7 +513,7 @@ export function graphFromHostCanvas(
     const node = createPlaygroundNode(
       stepId,
       stepType,
-      { x: (index + 1) * HOST_NODE_COLUMN_STEP, y: HOST_NODE_ROW_Y },
+      { x: 0, y: 0 },
       locale,
       {
         configuration: {
@@ -472,7 +540,7 @@ export function graphFromHostCanvas(
   const done = createPlaygroundNode(
     'done',
     'flow.complete',
-    { x: (steps.length + 1) * HOST_NODE_COLUMN_STEP, y: HOST_NODE_ROW_Y },
+    { x: 0, y: 0 },
     locale,
     {
       configuration: {
@@ -484,18 +552,60 @@ export function graphFromHostCanvas(
   );
   nodes.push(done);
 
+  // Build the DAG from each step's own `depends_on` -- never from array
+  // order. A step with an empty `depends_on` fans out from `start`; a step
+  // that nothing else depends on fans into `done`. `controlSourceHandle`
+  // returns a single stable id per source type (`success` for `flow.step`,
+  // `next` for `flow.start`), which React Flow lets fan out to any number of
+  // targets, so multiple steps can share the same entry point and multiple
+  // predecessors can converge on the same step without any handle conflict.
+  const dependedOn = new Set<string>();
   const edges = [];
-  let previous = 'start';
-  let previousHandle = 'next';
-  for (const step of steps) {
+  const hasIn = new Set<string>();
+  steps.forEach((step) => {
     const stepId = String(step.step_id ?? '');
-    if (!stepId) continue;
+    if (!stepId) return;
+    const dependsOn = Array.isArray(step.depends_on)
+      ? step.depends_on.filter(
+          (dep): dep is string => typeof dep === 'string' && stepIds.has(dep),
+        )
+      : [];
+    const sources = dependsOn.length > 0 ? dependsOn : ['start'];
+    for (const source of sources) {
+      if (source !== 'start') dependedOn.add(source);
+      edges.push(
+        createPlaygroundEdge(
+          {
+            source,
+            sourceHandle:
+              source === 'start'
+                ? controlSourceHandle('flow.start', registry)
+                : controlSourceHandle(stepType, registry),
+            target: stepId,
+            targetHandle: 'in',
+          },
+          nodes,
+          locale,
+          registry,
+        ),
+      );
+      hasIn.add(stepId);
+    }
+  });
+  const leaves = steps
+    .map((step) => String(step.step_id ?? ''))
+    .filter((stepId) => stepId && !dependedOn.has(stepId));
+  const sinks = leaves.length > 0 ? leaves : ['start'];
+  for (const source of sinks) {
     edges.push(
       createPlaygroundEdge(
         {
-          source: previous,
-          sourceHandle: previousHandle,
-          target: stepId,
+          source,
+          sourceHandle:
+            source === 'start'
+              ? controlSourceHandle('flow.start', registry)
+              : controlSourceHandle(stepType, registry),
+          target: 'done',
           targetHandle: 'in',
         },
         nodes,
@@ -503,24 +613,9 @@ export function graphFromHostCanvas(
         registry,
       ),
     );
-    previous = stepId;
-    previousHandle = controlSourceHandle(stepType, registry);
   }
-  edges.push(
-    createPlaygroundEdge(
-      {
-        source: previous,
-        sourceHandle: previousHandle,
-        target: 'done',
-        targetHandle: 'in',
-      },
-      nodes,
-      locale,
-      registry,
-    ),
-  );
 
-  return { nodes, edges, annotations: [] };
+  return layoutPlaygroundGraphInJavaScript({ nodes, edges, annotations: [] });
 }
 
 function objectiveFromNode(node: PlaygroundNode, fallback: unknown): unknown {
@@ -552,13 +647,30 @@ export function hostCanvasFromGraph(
     const objective = objectiveFromNode(node, step.objective);
     step.step_id = node.id;
     step.objective = objective;
+    // Depends-on comes from the canvas's own edges, not the possibly-stale
+    // `hostPlanStep.depends_on` cached on the node -- this is what makes a
+    // fan-out/fan-in structure drawn on the canvas (by hand or by Copilot's
+    // applyCopilotSteps, which also goes through graphFromHostCanvas) round-
+    // trip back into the saved plan instead of silently reverting to
+    // whatever the node was last created with.
+    const dependsOn = Array.from(
+      new Set(
+        graph.edges
+          .filter(
+            (edge) => edge.target === node.id && edge.targetHandle === 'in',
+          )
+          .map((edge) => edge.source)
+          .filter((source) => source !== 'start'),
+      ),
+    );
+    step.depends_on = dependsOn;
     nodes.push({
       id: node.id,
       kind: 'host.plan-step.v1',
       agent_id: step.agent_id,
       objective,
       capabilities: step.capabilities,
-      depends_on: Array.isArray(step.depends_on) ? step.depends_on : [],
+      depends_on: dependsOn,
       plan_step: step,
     });
   }
