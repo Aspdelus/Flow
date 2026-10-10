@@ -176,6 +176,9 @@ describe('Workflow Playground example library', () => {
         proposalDigest: 'sha256:504a8a69c20dd1e9cc872166bacda5b4f87db17c69be4d83d92c69d22b26f50d',
       }),
     );
+    expect(withDigest).toContain('由 AI 编排生成');
+    expect(withDigest).toContain('方案 #504a8a');
+    expect(withDigest).not.toContain('宿主');
     expect(withDigest).not.toContain('data-testid="host-proposal-digest"');
 
     const withoutProgress = renderToStaticMarkup(
