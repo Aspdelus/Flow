@@ -1636,8 +1636,8 @@ function WorkflowPlaygroundSurface({
           restore(next.graph);
           const appliedSuffix =
             locale === 'zh'
-              ? '已把 Copilot 的建议应用到画布（未保存）。'
-              : "Applied Copilot's suggestion to the canvas (unsaved).";
+              ? '已把 AI 助手的建议应用到画布（未保存）。'
+              : "Applied the AI assistant's suggestion to the canvas (unsaved).";
           return `${reply.message} ${appliedSuffix}`;
         }
         return reply.message;
@@ -1709,8 +1709,8 @@ function WorkflowPlaygroundSurface({
           context: extensionContextRef.current,
         });
         return locale === 'zh'
-          ? '请求已交给宿主 Copilot。'
-          : 'Request sent to the host Copilot.';
+          ? '已发送给 AI 助手。'
+          : 'Sent to the AI assistant.';
       },
       applyGraphEdit: hostMode
         ? (steps: JsonObject[]) => {

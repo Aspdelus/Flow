@@ -61,15 +61,17 @@ export function createHostInjectedExample(
     id: 'host-injected',
     category: 'approval',
     level: 'advanced',
-    title: locale === 'zh' ? '宿主注入方案' : 'Host-injected proposal',
+    // Placeholder until the run's own task text is loaded (see
+    // loadHostRunTaskText) -- the header shows that instead once known.
+    title: locale === 'zh' ? 'AI 规划方案' : 'AI plan',
     description:
       locale === 'zh'
-        ? '从 flow-host-serve 打开同一条 AgentPlan 权威链。'
-        : 'Open the same AgentPlan authority chain from flow-host-serve.',
+        ? '查看、调整并批准 AI 为你的任务生成的执行方案。'
+        : 'Review, adjust and approve the plan AI drafted for your task.',
     outcome:
       locale === 'zh'
-        ? 'Save 走 plan-edits；Approve 走 hook resume。'
-        : 'Save posts plan-edits; Approve resumes the hook.',
+        ? '保存修改后批准，方案即开始执行。'
+        : 'Save your changes, then approve to start running it.',
     capabilities: ['host.agent-plan.v2'],
     graph: { nodes: [], edges: [], annotations: [] },
   };
@@ -88,15 +90,15 @@ export function createHostRunPickerExample(
     id: 'host-run-picker',
     category: 'approval',
     level: 'advanced',
-    title: locale === 'zh' ? '选择一个运行' : 'Select a run',
+    title: locale === 'zh' ? '我的任务' : 'My tasks',
     description:
       locale === 'zh'
-        ? '已连接宿主，尚未选择要查看的运行。从左侧列表中选择一个。'
-        : 'Connected to a host; no run selected yet. Pick one from the list on the left.',
+        ? '从左侧选择一个任务查看方案，或新建一个任务。'
+        : 'Pick a task on the left to see its plan, or start a new one.',
     outcome:
       locale === 'zh'
-        ? '选择后加载该运行的 AgentPlan 权威链。'
-        : 'Selecting one loads that run’s AgentPlan authority chain.',
+        ? '打开后可以查看、调整并批准它的执行方案。'
+        : 'Open one to review, adjust and approve its plan.',
     capabilities: ['host.agent-plan.v2'],
     graph: { nodes: [], edges: [], annotations: [] },
   };
@@ -554,6 +556,33 @@ function controlSourceHandle(
   return 'next';
 }
 
+// User-facing labels for the two structural nodes every host plan has.
+function hostStartTitle(locale: FlowWebsiteLocale): string {
+  return locale === 'zh' ? '开始' : 'Start';
+}
+
+function hostDoneTitle(locale: FlowWebsiteLocale): string {
+  return locale === 'zh' ? '完成' : 'Done';
+}
+
+function hostDoneDesc(locale: FlowWebsiteLocale): string {
+  return locale === 'zh'
+    ? '全部步骤完成后结束'
+    : 'Ends once every step is done';
+}
+
+/** `方案 #504a8a` -- same short id the page header shows. */
+function hostPlanLabel(
+  canvas: HostCanvasDocument,
+  locale: FlowWebsiteLocale,
+): string {
+  const digest =
+    typeof canvas.proposal_digest === 'string' ? canvas.proposal_digest : '';
+  const hex = digest.startsWith('sha256:') ? digest.slice(7) : digest;
+  const prefix = locale === 'zh' ? '方案' : 'Plan';
+  return hex ? `${prefix} #${hex.slice(0, 6)}` : prefix;
+}
+
 function planStepById(
   canvas: HostCanvasDocument,
   stepId: string,
@@ -602,15 +631,19 @@ export function graphFromHostFlowDsl(
         ? data.agent_id
         : typeof planStep?.agent_id === 'string'
           ? planStep.agent_id
-          : type;
+          : type === 'flow.start'
+            ? hostStartTitle(locale)
+            : type === 'flow.complete'
+              ? hostDoneTitle(locale)
+              : type;
     const desc =
       typeof data.objective === 'string'
         ? data.objective
         : typeof planStep?.objective === 'string'
           ? planStep.objective
-          : typeof canvas.proposal_digest === 'string'
-            ? canvas.proposal_digest
-            : id;
+          : type === 'flow.complete'
+            ? hostDoneDesc(locale)
+            : hostPlanLabel(canvas, locale);
     const node = createPlaygroundNode(
       id,
       type,
@@ -782,11 +815,8 @@ export function graphFromHostCanvas(
     locale,
     {
       configuration: {
-        title: locale === 'zh' ? '宿主方案' : 'Host proposal',
-        desc:
-          typeof canvas.proposal_digest === 'string'
-            ? canvas.proposal_digest
-            : 'host.agent-plan.v2',
+        title: hostStartTitle(locale),
+        desc: hostPlanLabel(canvas, locale),
       },
       registry,
     },

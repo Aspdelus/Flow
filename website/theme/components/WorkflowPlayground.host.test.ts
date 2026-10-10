@@ -36,7 +36,11 @@ import {
 } from './WorkflowPlayground.host';
 import { createPlaygroundNodeCatalog } from './WorkflowPlayground.custom-nodes';
 import { createPlaygroundEdge } from './WorkflowPlayground.model';
-import { executionLabel, planningLabel } from './WorkflowPlaygroundChrome';
+import {
+  executionLabel,
+  planningLabel,
+  shortPlanId,
+} from './WorkflowPlaygroundChrome';
 
 const HOST_PREVIEW_TYPE = 'host.preview.step';
 
@@ -1411,5 +1415,26 @@ describe('WorkflowPlayground host mode', () => {
     } finally {
       vi.unstubAllGlobals();
     }
+  });
+
+  it('shortPlanId keeps six hex chars of a sha256 digest', () => {
+    expect(shortPlanId('sha256:504a8a69c20dd1e9cc87')).toBe('504a8a');
+    expect(shortPlanId('abcdef0123')).toBe('abcdef');
+  });
+
+  it('host-mode placeholder titles use product wording, not host internals', () => {
+    for (const locale of ['zh', 'en'] as const) {
+      for (const example of [
+        createHostInjectedExample(locale),
+        createHostRunPickerExample(locale),
+      ]) {
+        const text = `${example.title} ${example.description} ${example.outcome}`;
+        expect(text).not.toMatch(
+          /宿主|host|AgentPlan|flow-host|hook|plan-edits/i,
+        );
+      }
+    }
+    expect(createHostInjectedExample('zh').title).toBe('AI 规划方案');
+    expect(createHostRunPickerExample('zh').title).toBe('我的任务');
   });
 });

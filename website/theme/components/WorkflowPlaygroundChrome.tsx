@@ -146,6 +146,13 @@ type PlaygroundHeaderProps = {
    * `hostFlowStatus`/Save/Approve visibility on purpose. */
   onHostRecover?: () => void;
 };
+/** Short, human-scannable plan id from a `sha256:<hex>` digest. */
+export function shortPlanId(digest: string): string {
+  const hex = digest.startsWith('sha256:')
+    ? digest.slice('sha256:'.length)
+    : digest;
+  return hex.slice(0, 6);
+}
 
 export type PlanningStatus = {
   elapsedSecs: number;
@@ -246,18 +253,22 @@ export function WorkflowPlaygroundHeader({
             <span>
               {hostMode
                 ? locale === 'zh'
-                  ? '宿主权威'
-                  : 'Host authority'
+                  ? '由 AI 编排生成'
+                  : 'Drafted by AI'
                 : copy.localDraft}
             </span>
             <i />
-            <em>
+            <em
+              title={
+                hostMode && proposalDigest ? String(proposalDigest) : undefined
+              }
+            >
               {hostMode
                 ? proposalDigest
-                  ? String(proposalDigest).slice(0, 18)
+                  ? `${locale === 'zh' ? '方案' : 'Plan'} #${shortPlanId(String(proposalDigest))}`
                   : locale === 'zh'
-                    ? '加载中'
-                    : 'loading'
+                    ? '方案生成中'
+                    : 'Drafting plan'
                 : saveState === 'saving'
                   ? copy.saving
                   : copy.saved}
@@ -356,7 +367,7 @@ export function WorkflowPlaygroundHeader({
             type="button"
           >
             <NotePencil aria-hidden="true" />
-            <span>{locale === 'zh' ? '保存到宿主' : 'Save to host'}</span>
+            <span>{locale === 'zh' ? '保存修改' : 'Save changes'}</span>
           </button>
         ) : null}
         {hostMode && onHostApprove ? (
