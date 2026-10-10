@@ -5,6 +5,7 @@ import {
   type FlowTaskEnvelope,
   type HostCanvasDocument,
   type HostComposeProgressFrame,
+  type HostGateRequest,
   type HostPlanStepNode,
   type HostRecoveryFailure,
   type JsonObject,
@@ -12,7 +13,9 @@ import {
   canvasDocumentFromProposalDto,
   createA3SFlowDagNodeCatalog,
   FlowHostClient,
+  gateRequestFromDto,
   HostClientError,
+  issueGateApprovalRecord,
   parseHostModeSearch,
   recoveryFailureFromDto,
 } from '@a3s-lab/flow-ui';
@@ -456,6 +459,8 @@ export type HostRunExecution = {
   runningStepIds: string[];
   /** Steps a condition routed around (from the run output once it ends). */
   skippedStepIds: string[];
+  /** The approval step whose gate is waiting for a human, if any. */
+  openGateStepId: string | null;
   completedStepCount: number;
   failedStepCount: number;
 };
@@ -477,6 +482,7 @@ const AGENT_FLOW_STEP_ID = /^agent:(.+?)(?:\.retry(\d+))?$/;
 // A condition records its branch as host step `cond:<step_id>`; an approval
 // step waits on hook `gate:<step_id>` (adapters/flow-host/src/control_flow.rs).
 const CONDITION_FLOW_STEP_ID = /^cond:(.+)$/;
+const GATE_HOOK_ID = /^gate:(.+)$/;
 // An iteration runs body step <b> for item <i> as `agent:<b>@<i>`, parses its
 // items as `iter:<id>` and collects them as `iter:<id>.results`; a loop runs
 // round <r> as `agent:<b>#<r>`, decides it as `loop:<id>@<r>` and ends as
@@ -626,6 +632,20 @@ export function hostRunExecutionFromSnapshot(
       items === 'success' ? 'success' : nodeStatus;
     if (nodeStatus === 'success') completedStepCount += 1;
   }
+  let openGateStepId: string | null = null;
+  const hooks = isRecord(record.hooks) ? record.hooks : {};
+  for (const [hookId, hook] of Object.entries(hooks)) {
+    const match = GATE_HOOK_ID.exec(hookId);
+    if (!match || !isRecord(hook) || typeof hook.status !== 'string') continue;
+    const hookStatus = hook.status.toLowerCase();
+    if (hookStatus === 'active') {
+      nodeStatuses[match[1]] = 'waiting';
+      openGateStepId = match[1];
+    } else if (hookStatus === 'received') {
+      nodeStatuses[match[1]] = 'success';
+      completedStepCount += 1;
+    }
+  }
   // A plan's fail step records `FAILED_BY_PLAN <step_id>: <reason>`
   // (adapters/flow-host control_flow.rs PLAN_FAILURE_PREFIX).
   const planFailure =
@@ -648,9 +668,52 @@ export function hostRunExecutionFromSnapshot(
     nodeStatuses,
     runningStepIds,
     skippedStepIds,
+    openGateStepId,
     completedStepCount,
     failedStepCount,
   };
+}
+
+/**
+ * `null` when the run waits on no approval gate. Like
+ * loadHostRecoveryFailure, a 404 is the ordinary case, never an error.
+ */
+export async function loadHostOpenGate(
+  config: HostModeConfig,
+): Promise<HostGateRequest | null> {
+  const client = createHostClient(config);
+  const { status, json } = await client.getOpenGate(config.runId);
+  if (status === 404) return null;
+  if (status < 200 || status >= 300) {
+    const message =
+      typeof json.error === 'string' ? json.error : `HTTP ${status}`;
+    throw new HostClientError(`INVALID_INPUT: ${message}`);
+  }
+  return gateRequestFromDto(json);
+}
+
+/** Approve or reject the run's open gate; the host drives the run on inside
+ * this request. Throws when the host refuses the decision (the gate stays open). */
+export async function submitGateDecision(
+  config: HostModeConfig,
+  gate: HostGateRequest,
+  approved: boolean,
+  comment: string,
+): Promise<JsonObject> {
+  const record = await issueGateApprovalRecord({
+    proposalDigest: gate.proposal_digest,
+    runId: config.runId,
+    stepId: gate.step_id,
+    tenantId: gate.tenant_id || config.tenantId,
+    principalRef: config.principalRef,
+    approved,
+    comment,
+  });
+  return createHostClient(config).decideGate(
+    config.runId,
+    gate.step_id,
+    record,
+  );
 }
 
 /** One `GET /v1/runs/{id}` read, projected for the canvas. Throws on host

@@ -10,6 +10,7 @@ import {
   type A3SFlowWorkflowDagNode,
   type HostCanvasDocument,
   type HostComposeProgressFrame,
+  type HostGateRequest,
   type HostRecoveryFailure,
   type JsonObject,
 } from '@a3s-lab/flow-ui';
@@ -88,7 +89,9 @@ import {
   listHostRuns,
   loadHostCanvas,
   loadHostPlanRefusal,
+  loadHostOpenGate,
   loadHostRecoveryFailure,
+  submitGateDecision,
   loadHostRunExecution,
   loadHostRunTaskText,
   pendingRunStart,
@@ -130,6 +133,7 @@ import {
 } from './WorkflowPlayground.model';
 import { WorkflowPlaygroundNode } from './WorkflowPlaygroundNode';
 import { WorkflowPlaygroundRegistryContext } from './WorkflowPlayground.registry';
+import { WorkflowPlaygroundGateDialog } from './WorkflowPlaygroundGateDialog';
 import { WorkflowPlaygroundRecoveryDialog } from './WorkflowPlaygroundRecoveryDialog';
 import type { WorkflowPlaygroundRecoveryEdit } from './WorkflowPlaygroundRecoveryDialog';
 import { WorkflowPlaygroundTriggerDialog } from './WorkflowPlaygroundTriggerDialog';
@@ -202,6 +206,14 @@ function WorkflowPlaygroundSurface({
   const [hostRecoveryFailure, setHostRecoveryFailure] =
     useState<HostRecoveryFailure | null>(null);
   const [recoveryDialogOpen, setRecoveryDialogOpen] = useState(false);
+  // Mid-plan approval gate the run waits on (GET /v1/runs/{id}/gate), loaded
+  // whenever the execution poll sees an open `gate:<step_id>` hook.
+  const [hostOpenGate, setHostOpenGate] = useState<HostGateRequest | null>(
+    null,
+  );
+  const [gateDialogOpen, setGateDialogOpen] = useState(false);
+  const [gateBusy, setGateBusy] = useState(false);
+  const [gateError, setGateError] = useState<string | null>(null);
   const [recoveryBusy, setRecoveryBusy] = useState(false);
   const [recoveryError, setRecoveryError] = useState<string | null>(null);
   // Fail-soft overlay only, never a gate on anything -- see
@@ -537,6 +549,25 @@ function WorkflowPlaygroundSurface({
       if (timer !== undefined) window.clearTimeout(timer);
     };
   }, [hostMode, hostRunId, hostCanvasLoaded, hostExecutionWatch]);
+
+  const openGateStepId = hostExecution?.openGateStepId ?? null;
+  useEffect(() => {
+    if (!hostMode || !openGateStepId) {
+      setHostOpenGate(null);
+      return;
+    }
+    let cancelled = false;
+    void loadHostOpenGate(hostMode)
+      .then((gate) => {
+        if (!cancelled) setHostOpenGate(gate);
+      })
+      .catch(() => {
+        if (!cancelled) setHostOpenGate(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [hostMode, openGateStepId]);
 
   // Run-history picker: hostMode set, no runId yet -- list every run on the
   // connected host so the operator can pick one. Refetches whenever the
@@ -1590,6 +1621,34 @@ function WorkflowPlaygroundSurface({
     [catalog, hostMode, locale, restore],
   );
 
+  // Approve or reject the open gate. Like Approve, the host drives the run on
+  // inside this request; a refused decision throws so the dialog stays open
+  // (the gate is left open by the host).
+  const decideGateOnHost = useCallback(
+    async (approved: boolean, comment: string) => {
+      if (!hostMode || !hostOpenGate) return;
+      approveInFlightRef.current = true;
+      setHostExecutionWatch((value) => value + 1);
+      try {
+        await submitGateDecision(hostMode, hostOpenGate, approved, comment);
+      } finally {
+        approveInFlightRef.current = false;
+        setHostExecutionWatch((value) => value + 1);
+      }
+      setHostOpenGate(null);
+      setAnnouncement(
+        locale === 'zh'
+          ? approved
+            ? '已批准，继续执行'
+            : '已驳回，本次运行在此结束'
+          : approved
+            ? 'Approved, continuing'
+            : 'Rejected, the run ends here',
+      );
+    },
+    [hostMode, hostOpenGate, locale],
+  );
+
   const addHostStep = useCallback(() => {
     if (!hostMode || !hostCanvas) return;
     if (!hostRunEditActions(hostCanvas).addStep) return;
@@ -1856,6 +1915,9 @@ function WorkflowPlaygroundSurface({
         onHostApprove={hostEdits?.approve ? approveOnHost : undefined}
         onHostRecover={
           canRecoverOnHost ? () => setRecoveryDialogOpen(true) : undefined
+        }
+        onHostReviewGate={
+          hostOpenGate ? () => setGateDialogOpen(true) : undefined
         }
         onHostSave={hostEdits?.save ? saveToHost : undefined}
         onOpenDocument={openDocument}
@@ -2299,6 +2361,31 @@ function WorkflowPlaygroundSurface({
           onSubmit={submitTriggerInput}
           schema={triggerSchema}
           workflowName={example.title}
+        />
+      )}
+
+      {gateDialogOpen && hostOpenGate && (
+        <WorkflowPlaygroundGateDialog
+          busy={gateBusy}
+          error={gateError}
+          gate={hostOpenGate}
+          locale={locale}
+          onClose={() => {
+            setGateDialogOpen(false);
+            setGateError(null);
+          }}
+          onDecide={(approved, comment) => {
+            setGateBusy(true);
+            setGateError(null);
+            void decideGateOnHost(approved, comment)
+              .then(() => setGateDialogOpen(false))
+              .catch((error: unknown) => {
+                setGateError(
+                  error instanceof Error ? error.message : String(error),
+                );
+              })
+              .finally(() => setGateBusy(false));
+          }}
         />
       )}
 
