@@ -14,14 +14,11 @@ import { WorkflowPlaygroundHostStepEditor } from './WorkflowPlaygroundHostStepEd
 const fixture = JSON.parse(
   readFileSync(
     fileURLToPath(
-      new URL(
-        '../../../../../fixtures/conformance/funnel-conformance.json',
-        import.meta.url,
-      ),
+      new URL('./fixtures/funnel-conformance-plans.json', import.meta.url),
     ),
     'utf8',
   ),
-) as { plans: { plan: Record<string, unknown> }[] };
+) as { plans: Record<number, { plan: Record<string, unknown> }> };
 
 function render(nodeId: string): string {
   const document = canvasDocumentFromProposalDto({

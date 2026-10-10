@@ -2065,14 +2065,11 @@ describe('WorkflowPlayground host mode: nodes a save cannot carry', () => {
   const fixture = JSON.parse(
     readFileSync(
       fileURLToPath(
-        new URL(
-          '../../../../../fixtures/conformance/funnel-conformance.json',
-          import.meta.url,
-        ),
+        new URL('./fixtures/funnel-conformance-plans.json', import.meta.url),
       ),
       'utf8',
     ),
-  ) as { plans: { plan: Record<string, unknown> }[] };
+  ) as { plans: Record<number, { plan: Record<string, unknown> }> };
   const canvasOf = (plan: Record<string, unknown>) =>
     canvasDocumentFromProposalDto({
       schema_version: 'host.flow-http-proposal.v1',
@@ -2124,14 +2121,11 @@ describe('WorkflowPlayground host mode: editing control flow on the canvas', () 
   const fixture = JSON.parse(
     readFileSync(
       fileURLToPath(
-        new URL(
-          '../../../../../fixtures/conformance/funnel-conformance.json',
-          import.meta.url,
-        ),
+        new URL('./fixtures/funnel-conformance-plans.json', import.meta.url),
       ),
       'utf8',
     ),
-  ) as { plans: { plan: Record<string, unknown> }[] };
+  ) as { plans: Record<number, { plan: Record<string, unknown> }> };
   const canvasOf = (plan: Record<string, unknown>) =>
     canvasDocumentFromProposalDto({
       schema_version: 'host.flow-http-proposal.v1',
@@ -2287,14 +2281,11 @@ describe('WorkflowPlayground host mode: adding a step', () => {
   const fixture = JSON.parse(
     readFileSync(
       fileURLToPath(
-        new URL(
-          '../../../../../fixtures/conformance/funnel-conformance.json',
-          import.meta.url,
-        ),
+        new URL('./fixtures/funnel-conformance-plans.json', import.meta.url),
       ),
       'utf8',
     ),
-  ) as { plans: { plan: Record<string, unknown> }[] };
+  ) as { plans: Record<number, { plan: Record<string, unknown> }> };
 
   it('adds a plain agent step even when the plan starts with a control-flow step', () => {
     // plans[9] with its condition moved first: the old template copied steps[0].
@@ -2337,14 +2328,11 @@ describe('WorkflowPlayground host mode: the control-flow editor helpers', () => 
   const fixture = JSON.parse(
     readFileSync(
       fileURLToPath(
-        new URL(
-          '../../../../../fixtures/conformance/funnel-conformance.json',
-          import.meta.url,
-        ),
+        new URL('./fixtures/funnel-conformance-plans.json', import.meta.url),
       ),
       'utf8',
     ),
-  ) as { plans: { plan: Record<string, unknown> }[] };
+  ) as { plans: Record<number, { plan: Record<string, unknown> }> };
   const document = canvasDocumentFromProposalDto({
     schema_version: 'host.flow-http-proposal.v1',
     run_id: 'run-h',
@@ -2471,14 +2459,11 @@ describe('WorkflowPlayground host mode: the AI assistant and control flow', () =
   const fixture = JSON.parse(
     readFileSync(
       fileURLToPath(
-        new URL(
-          '../../../../../fixtures/conformance/funnel-conformance.json',
-          import.meta.url,
-        ),
+        new URL('./fixtures/funnel-conformance-plans.json', import.meta.url),
       ),
       'utf8',
     ),
-  ) as { plans: { plan: Record<string, unknown> }[] };
+  ) as { plans: Record<number, { plan: Record<string, unknown> }> };
   const plan = fixture.plans[9].plan;
   const steps = plan.steps as Record<string, unknown>[];
   const canvas = () =>
