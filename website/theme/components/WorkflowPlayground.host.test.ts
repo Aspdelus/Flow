@@ -1623,19 +1623,17 @@ describe('WorkflowPlayground host mode', () => {
 });
 
 describe('WorkflowPlayground host mode: control-flow plan steps', () => {
-  // fixtures/conformance/funnel-conformance.json plans[9]: the Python oracle's
-  // (and, byte for byte, orchestrator-core's) condition + approval plan.
+  // plans[9] of the Orchestrator's fixtures/conformance/funnel-conformance.json
+  // (vendored in ./fixtures): the Python oracle's (and, byte for byte,
+  // orchestrator-core's) condition + approval plan.
   const fixture = JSON.parse(
     readFileSync(
       fileURLToPath(
-        new URL(
-          '../../../../../fixtures/conformance/funnel-conformance.json',
-          import.meta.url,
-        ),
+        new URL('./fixtures/funnel-conformance-plans.json', import.meta.url),
       ),
       'utf8',
     ),
-  ) as { plans: { plan: Record<string, unknown> }[] };
+  ) as { plans: Record<number, { plan: Record<string, unknown> }> };
   const plan = fixture.plans[9].plan;
   const canvas = () =>
     canvasDocumentFromProposalDto({
@@ -1733,14 +1731,11 @@ describe('WorkflowPlayground host mode: fail steps', () => {
   const fixture = JSON.parse(
     readFileSync(
       fileURLToPath(
-        new URL(
-          '../../../../../fixtures/conformance/funnel-conformance.json',
-          import.meta.url,
-        ),
+        new URL('./fixtures/funnel-conformance-plans.json', import.meta.url),
       ),
       'utf8',
     ),
-  ) as { plans: { plan: Record<string, unknown> }[] };
+  ) as { plans: Record<number, { plan: Record<string, unknown> }> };
   const plan = fixture.plans[14].plan;
   const canvas = () =>
     canvasDocumentFromProposalDto({
@@ -1795,14 +1790,11 @@ describe('WorkflowPlayground host mode: step timeouts', () => {
   const fixture = JSON.parse(
     readFileSync(
       fileURLToPath(
-        new URL(
-          '../../../../../fixtures/conformance/funnel-conformance.json',
-          import.meta.url,
-        ),
+        new URL('./fixtures/funnel-conformance-plans.json', import.meta.url),
       ),
       'utf8',
     ),
-  ) as { plans: { plan: Record<string, unknown> }[] };
+  ) as { plans: Record<number, { plan: Record<string, unknown> }> };
   const plan = fixture.plans[15].plan;
   const canvas = () =>
     canvasDocumentFromProposalDto({
@@ -1850,14 +1842,11 @@ describe('WorkflowPlayground host mode: iterations', () => {
   const fixture = JSON.parse(
     readFileSync(
       fileURLToPath(
-        new URL(
-          '../../../../../fixtures/conformance/funnel-conformance.json',
-          import.meta.url,
-        ),
+        new URL('./fixtures/funnel-conformance-plans.json', import.meta.url),
       ),
       'utf8',
     ),
-  ) as { plans: { plan: Record<string, unknown> }[] };
+  ) as { plans: Record<number, { plan: Record<string, unknown> }> };
   // list (list_output) -> each { quote } -> summary (reads each.results)
   const plan = fixture.plans[17].plan;
   const canvas = () =>
@@ -1953,14 +1942,11 @@ describe('WorkflowPlayground host mode: loops', () => {
   const fixture = JSON.parse(
     readFileSync(
       fileURLToPath(
-        new URL(
-          '../../../../../fixtures/conformance/funnel-conformance.json',
-          import.meta.url,
-        ),
+        new URL('./fixtures/funnel-conformance-plans.json', import.meta.url),
       ),
       'utf8',
     ),
-  ) as { plans: { plan: Record<string, unknown> }[] };
+  ) as { plans: Record<number, { plan: Record<string, unknown> }> };
   // refine { draft -> check } (until check.verdict == PASS, 3 rounds) -> publish
   const plan = fixture.plans[19].plan;
   const canvas = () =>
