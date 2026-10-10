@@ -10,6 +10,7 @@ import {
   refuseUninjectedPlayground,
 } from '@a3s-lab/flow-ui';
 import {
+  addHostPlanStep,
   applyCopilotSteps,
   beginNewRun,
   createHostInjectedExample,
@@ -17,8 +18,16 @@ import {
   createHostRunPickerExample,
   graphFromHostCanvas,
   hostCanvasFromGraph,
+  hostApprovalInputs,
+  hostConditionChain,
+  hostConditionInput,
+  hostOtherwiseTargets,
+  hostRewireOtherwise,
   hostRunExecutionFromSnapshot,
+  hostStepOutputOptions,
   hostUnsavedNodes,
+  hostWithApprovalInputs,
+  hostWithConditionInput,
   hostUnsavedNodesNotice,
   isHostRunExecutionActive,
   isProposalNotYetReady,
@@ -42,6 +51,7 @@ import { createPlaygroundNodeCatalog } from './WorkflowPlayground.custom-nodes';
 import {
   createPlaygroundEdge,
   createPlaygroundNode,
+  type PlaygroundGraphState,
 } from './WorkflowPlayground.model';
 import {
   executionLabel,
@@ -2092,5 +2102,352 @@ describe('WorkflowPlayground host mode: nodes a save cannot carry', () => {
       hostUnsavedNodesNotice([{ title: '等一等' }, { title: 'B' }], 'zh'),
     ).toBe('以下节点不会被保存：等一等、B（暂不支持把它们写进方案）');
     expect(hostUnsavedNodesNotice([], 'en')).toBe('');
+  });
+});
+
+describe('WorkflowPlayground host mode: editing control flow on the canvas', () => {
+  const fixture = JSON.parse(
+    readFileSync(
+      fileURLToPath(
+        new URL(
+          '../../../../../fixtures/conformance/funnel-conformance.json',
+          import.meta.url,
+        ),
+      ),
+      'utf8',
+    ),
+  ) as { plans: { plan: Record<string, unknown> }[] };
+  const canvasOf = (plan: Record<string, unknown>) =>
+    canvasDocumentFromProposalDto({
+      schema_version: 'host.flow-http-proposal.v1',
+      run_id: 'run-e',
+      proposal_digest: 'sha256:e',
+      flow_dsl: { kind: 'app' },
+      execution_digest: 'feed',
+      approval_hook_waiting: true,
+      approval_token: 'tok',
+      proposal: { plan },
+    });
+  const wire = (source: string, sourceHandle: string, target: string) =>
+    ({
+      id: `${source}-${sourceHandle}-${target}`,
+      source,
+      sourceHandle,
+      target,
+      targetHandle: 'in',
+    }) as unknown as PlaygroundGraphState['edges'][number];
+  const withConfig = (
+    node: PlaygroundGraphState['nodes'][number],
+    config: Record<string, string>,
+  ): PlaygroundGraphState['nodes'][number] => ({
+    ...node,
+    data: {
+      ...node.data,
+      dagNode: {
+        ...node.data.dagNode,
+        data: { ...node.data.dagNode.data, ...config },
+      },
+    },
+  });
+  const stepOf = (saved: ReturnType<typeof hostCanvasFromGraph>, id: string) =>
+    JSON.parse(
+      JSON.stringify(
+        (saved.plan.steps as Record<string, unknown>[]).find(
+          (step) => step.step_id === id,
+        ),
+      ),
+    );
+
+  it('saves a relabelled case and rewired branches straight from the canvas', () => {
+    const document = canvasOf(fixture.plans[9].plan);
+    const graph = graphFromHostCanvas(document, 'zh', hostCatalog());
+    // Rename case 0, send case 1 to notify, and make backorder the fallback.
+    const nodes = graph.nodes.map((node) =>
+      node.id === 'route'
+        ? withConfig(node, { matched_label: 'available' })
+        : node,
+    );
+    const edges = graph.edges
+      .filter(
+        (edge) =>
+          !(
+            edge.source === 'route~1' &&
+            (edge.target === 'backorder' || edge.target === 'notify')
+          ),
+      )
+      .concat([
+        wire('route~1', 'matched', 'notify'),
+        wire('route~1', 'otherwise', 'backorder'),
+      ]);
+    const route = stepOf(
+      hostCanvasFromGraph(document, { ...graph, nodes, edges }),
+      'route',
+    );
+    expect(route.cases).toEqual([
+      { label: 'available', then: ['tax'] },
+      { label: 'Out of stock', then: ['notify'] },
+    ]);
+    expect(route.otherwise).toEqual(['backorder']);
+    expect(route.inputs).toEqual(['inventory.stock']);
+  });
+
+  it('turns a condition, a gate and a stop dragged in from the library into plan steps', () => {
+    const document = canvasOf(fixture.plans[0].plan);
+    const graph = graphFromHostCanvas(document, 'zh', hostCatalog());
+    const node = (
+      id: string,
+      type: string,
+      config: Record<string, string | Record<string, string>>,
+    ) =>
+      createPlaygroundNode(id, type, { x: 0, y: 0 }, 'zh', {
+        configuration: config,
+        registry: hostCatalog().registry,
+      });
+    const nodes = [
+      ...graph.nodes,
+      node('condition_1', 'flow.condition', {
+        title: '是否有货',
+        desc: '库存是否充足',
+        matched_label: 'in stock',
+        input: { source: 'inventory.stock' },
+      }),
+      node('fail_1', 'flow.fail', { title: '终止', desc: '缺货，停止' }),
+      node('hook_1', 'flow.hook', { title: '人工审批', desc: '确认税费' }),
+    ];
+    const edges = [
+      ...graph.edges.filter(
+        (edge) => !(edge.source === 'tax' && edge.target === 'logistics'),
+      ),
+      wire('inventory', 'success', 'condition_1'),
+      wire('condition_1', 'matched', 'tax'),
+      wire('condition_1', 'otherwise', 'fail_1'),
+      wire('tax', 'success', 'hook_1'),
+      wire('hook_1', 'received', 'logistics'),
+    ];
+    const next = { ...graph, nodes, edges };
+    expect(hostUnsavedNodes(next)).toEqual([]);
+    const saved = hostCanvasFromGraph(document, next);
+    expect(stepOf(saved, 'condition_1')).toMatchObject({
+      kind: 'condition',
+      objective: '库存是否充足',
+      inputs: ['inventory.stock'],
+      cases: [{ label: 'in stock', then: ['tax'] }],
+      otherwise: ['fail_1'],
+    });
+    expect(stepOf(saved, 'condition_1').agent_id).toBeUndefined();
+    expect(stepOf(saved, 'fail_1')).toMatchObject({
+      kind: 'fail',
+      objective: '缺货，停止',
+    });
+    expect(stepOf(saved, 'hook_1')).toMatchObject({
+      kind: 'approval',
+      inputs: ['tax.duty'],
+    });
+    expect(stepOf(saved, 'logistics').depends_on).toContain('hook_1');
+    // A branch target never depends on the condition that routes to it.
+    expect(stepOf(saved, 'tax').depends_on).toEqual([]);
+    expect(saved.plan.edges).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          from: 'condition_1',
+          to: 'tax',
+          branch: 'case:0',
+        }),
+        expect.objectContaining({
+          from: 'condition_1',
+          to: 'fail_1',
+          branch: 'otherwise',
+        }),
+        expect.objectContaining({
+          from: 'hook_1',
+          to: 'logistics',
+          output: null,
+        }),
+      ]),
+    );
+  });
+});
+
+describe('WorkflowPlayground host mode: adding a step', () => {
+  const fixture = JSON.parse(
+    readFileSync(
+      fileURLToPath(
+        new URL(
+          '../../../../../fixtures/conformance/funnel-conformance.json',
+          import.meta.url,
+        ),
+      ),
+      'utf8',
+    ),
+  ) as { plans: { plan: Record<string, unknown> }[] };
+
+  it('adds a plain agent step even when the plan starts with a control-flow step', () => {
+    // plans[9] with its condition moved first: the old template copied steps[0].
+    const plan = JSON.parse(JSON.stringify(fixture.plans[9].plan)) as {
+      steps: Record<string, unknown>[];
+    };
+    plan.steps = [plan.steps[1], plan.steps[0], ...plan.steps.slice(2)];
+    const document = canvasDocumentFromProposalDto({
+      schema_version: 'host.flow-http-proposal.v1',
+      run_id: 'run-a',
+      proposal_digest: 'sha256:a',
+      flow_dsl: { kind: 'app' },
+      execution_digest: 'feed',
+      approval_hook_waiting: true,
+      approval_token: 'tok',
+      proposal: { plan },
+    });
+    const { canvas } = addHostPlanStep(
+      document,
+      graphFromHostCanvas(document, 'zh', hostCatalog()),
+      'zh',
+      hostCatalog(),
+    );
+    const added = JSON.parse(
+      JSON.stringify((canvas.plan.steps as Record<string, unknown>[]).at(-1)),
+    );
+    expect(added.kind).toBeUndefined();
+    expect(added.cases).toBeUndefined();
+    expect(added).toMatchObject({
+      agent_id: 'inventory.lookup',
+      objective: '新步骤',
+      outputs: ['result'],
+      depends_on: ['logistics'],
+    });
+    expect(added.step_id).toBe('step-host-8');
+  });
+});
+
+describe('WorkflowPlayground host mode: the control-flow editor helpers', () => {
+  const fixture = JSON.parse(
+    readFileSync(
+      fileURLToPath(
+        new URL(
+          '../../../../../fixtures/conformance/funnel-conformance.json',
+          import.meta.url,
+        ),
+      ),
+      'utf8',
+    ),
+  ) as { plans: { plan: Record<string, unknown> }[] };
+  const document = canvasDocumentFromProposalDto({
+    schema_version: 'host.flow-http-proposal.v1',
+    run_id: 'run-h',
+    proposal_digest: 'sha256:h',
+    flow_dsl: { kind: 'app' },
+    execution_digest: 'feed',
+    approval_hook_waiting: true,
+    approval_token: 'tok',
+    proposal: { plan: fixture.plans[9].plan },
+  });
+  const graph = graphFromHostCanvas(document, 'zh', hostCatalog());
+  const makeEdge = (source: string, sourceHandle: string, target: string) =>
+    ({
+      id: `${source}-${target}`,
+      source,
+      sourceHandle,
+      target,
+      targetHandle: 'in',
+    }) as unknown as PlaygroundGraphState['edges'][number];
+
+  it('lists outputs, finds a chain from any of its nodes and rewires otherwise into a saved plan', () => {
+    expect(hostStepOutputOptions(graph)).toEqual(
+      expect.arrayContaining([
+        'inventory.stock',
+        'tax.duty',
+        'backorder.quote',
+      ]),
+    );
+    expect(hostConditionChain(graph, 'route~1').map((node) => node.id)).toEqual(
+      ['route', 'route~1'],
+    );
+    expect(hostOtherwiseTargets(graph, 'route')).toEqual(['notify']);
+    const edges = hostRewireOtherwise(
+      graph,
+      'route',
+      ['backorder', 'notify'],
+      makeEdge,
+    );
+    expect(hostOtherwiseTargets({ ...graph, edges }, 'route~1')).toEqual([
+      'backorder',
+      'notify',
+    ]);
+    const route = JSON.parse(
+      JSON.stringify(
+        (
+          hostCanvasFromGraph(document, { ...graph, edges }).plan
+            .steps as Record<string, unknown>[]
+        ).find((s) => s.step_id === 'route'),
+      ),
+    );
+    expect(route.otherwise).toEqual(['backorder', 'notify']);
+  });
+
+  it('sets what a condition routes on from any of its case nodes', () => {
+    expect(hostConditionInput(graph, 'route~1')).toBe('inventory.stock');
+    // (Routing on a branch target's output would be a cycle -- the save refuses that.)
+    const nodes = hostWithConditionInput(graph, 'route~1', 'notify.notice');
+    expect(hostConditionInput({ ...graph, nodes }, 'route')).toBe(
+      'notify.notice',
+    );
+    expect(() => hostCanvasFromGraph(document, { ...graph, nodes })).toThrow(
+      /cycle/,
+    );
+    // Clearing it falls back to the step's own input.
+    const cleared = hostWithConditionInput({ ...graph, nodes }, 'route', '');
+    const route = JSON.parse(
+      JSON.stringify(
+        (
+          hostCanvasFromGraph(document, { ...graph, nodes: cleared }).plan
+            .steps as Record<string, unknown>[]
+        ).find((s) => s.step_id === 'route'),
+      ),
+    );
+    expect(route.inputs).toEqual(['inventory.stock']);
+  });
+
+  it('edits what an approval gate shows, also for a gate dragged in from the library', () => {
+    expect(hostApprovalInputs(graph, 'signoff')).toEqual(['tax.duty']);
+    const nodes = hostWithApprovalInputs(graph, 'signoff', [
+      'tax.duty',
+      'inventory.stock',
+    ]);
+    const saved = hostCanvasFromGraph(document, { ...graph, nodes });
+    const signoff = JSON.parse(
+      JSON.stringify(
+        (saved.plan.steps as Record<string, unknown>[]).find(
+          (s) => s.step_id === 'signoff',
+        ),
+      ),
+    );
+    expect(signoff.inputs).toEqual(['tax.duty', 'inventory.stock']);
+    const hook = createPlaygroundNode(
+      'hook_1',
+      'flow.hook',
+      { x: 0, y: 0 },
+      'zh',
+      { configuration: { title: '审批' }, registry: hostCatalog().registry },
+    );
+    const dragged = {
+      ...graph,
+      nodes: [...graph.nodes, hook],
+      edges: [...graph.edges, makeEdge('tax', 'success', 'hook_1')],
+    };
+    expect(hostApprovalInputs(dragged, 'hook_1')).toEqual(['tax.duty']);
+    const drafted = hostWithApprovalInputs(dragged, 'hook_1', [
+      'inventory.stock',
+    ]);
+    const step = JSON.parse(
+      JSON.stringify(
+        (
+          hostCanvasFromGraph(document, { ...dragged, nodes: drafted }).plan
+            .steps as Record<string, unknown>[]
+        ).find((s) => s.step_id === 'hook_1'),
+      ),
+    );
+    expect(step).toMatchObject({
+      kind: 'approval',
+      inputs: ['inventory.stock'],
+    });
   });
 });

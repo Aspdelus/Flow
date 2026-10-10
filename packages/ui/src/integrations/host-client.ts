@@ -400,6 +400,31 @@ export class FlowHostClient {
     }
   }
 
+  /**
+   * `POST /v1/runs/{run_id}/replan` -- ask the Orchestrator to plan again on
+   * the same run (a saved edit never re-plans).  The canvas plan goes along
+   * as a hint; a refused hint answers 400 like a refused edit, never thrown.
+   */
+  async requestReplan(
+    canvas: HostCanvasDocument,
+    editRevision: number,
+  ): Promise<{ status: number; json: JsonObject }> {
+    const body = planEditBodyFromCanvas(canvas, editRevision);
+    try {
+      const { status, json } = await this.request(
+        'POST',
+        `/v1/runs/${encodeURIComponent(canvas.run_id)}/replan`,
+        body,
+      );
+      return { status, json: (json ?? {}) as JsonObject };
+    } catch (error) {
+      if (error instanceof HostClientError && error.status !== undefined) {
+        return { status: error.status, json: (error.body ?? {}) as JsonObject };
+      }
+      throw error;
+    }
+  }
+
   async saveCanvas(
     canvas: HostCanvasDocument,
     editRevision: number,

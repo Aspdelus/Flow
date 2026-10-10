@@ -82,8 +82,12 @@ import {
   createHostClient,
   graphFromHostCanvas,
   hostCanvasFromGraph,
+  hostRewireOtherwise,
+  hostStepEditorKind,
   hostUnsavedNodes,
   hostUnsavedNodesNotice,
+  hostWithApprovalInputs,
+  hostWithConditionInput,
   isHostRunExecutionActive,
   isProposalNotYetReady,
   isProposalRefused,
@@ -122,6 +126,7 @@ import {
   collectDeletionIds,
   normalizePlaygroundEdgeLabel,
   compilePlaygroundGraph,
+  createPlaygroundEdge,
   PLAYGROUND_EDGE_COLORS,
   playgroundGraphSemanticKey,
   validatePlaygroundConfigurations,
@@ -136,6 +141,7 @@ import {
 import { WorkflowPlaygroundNode } from './WorkflowPlaygroundNode';
 import { WorkflowPlaygroundRegistryContext } from './WorkflowPlayground.registry';
 import { WorkflowPlaygroundGateDialog } from './WorkflowPlaygroundGateDialog';
+import { WorkflowPlaygroundHostStepEditor } from './WorkflowPlaygroundHostStepEditor';
 import { WorkflowPlaygroundRecoveryDialog } from './WorkflowPlaygroundRecoveryDialog';
 import type { WorkflowPlaygroundRecoveryEdit } from './WorkflowPlaygroundRecoveryDialog';
 import { WorkflowPlaygroundTriggerDialog } from './WorkflowPlaygroundTriggerDialog';
@@ -1424,6 +1430,78 @@ function WorkflowPlaygroundSurface({
     });
   }, [catalog, editRevision, graph, hostCanvas, hostMode, locale, restore]);
 
+  // "Let the AI plan again": the current canvas goes along as a hint; the run
+  // stays the same and gets a new proposal once orchestrator.plan.r{n} ends.
+  const replanOnHost = useCallback(() => {
+    if (!hostMode || !hostCanvas) return;
+    let hint: HostCanvasDocument;
+    try {
+      hint = hostCanvasFromGraph(hostCanvas, graph);
+    } catch (error) {
+      setAnnouncement(error instanceof Error ? error.message : String(error));
+      return;
+    }
+    const client = createHostClient(hostMode);
+    setHostBusy(true);
+    void client
+      .requestReplan(hint, editRevision)
+      .then(async (result) => {
+        const decision = (result.json.decision ?? {}) as {
+          status?: string;
+          message?: string;
+        };
+        setEditRevision((current) => {
+          if (!hostMode?.runId || typeof sessionStorage === 'undefined') {
+            return current >= 1 ? Math.floor(current) + 1 : 1;
+          }
+          return advanceHostEditRevision(
+            sessionStorage,
+            hostMode.runId,
+            current,
+          );
+        });
+        if (decision.status !== 'REPLAN_REQUIRED') {
+          setAnnouncement(
+            `${decision.status ?? result.status}${decision.message ? `: ${decision.message}` : ''}`,
+          );
+          return;
+        }
+        setAnnouncement(locale === 'zh' ? 'AI 正在重新规划…' : 'Re-planning…');
+        const deadline = Date.now() + 660_000;
+        while (Date.now() < deadline) {
+          await new Promise((resolve) => window.setTimeout(resolve, 2000));
+          const dto = await client
+            .getProposal(hostMode.runId)
+            .catch(() => null);
+          if (
+            dto &&
+            dto.replan_pending === false &&
+            dto.approval_hook_waiting === true
+          ) {
+            const refreshed = refreshCanvasFromProposalDto(dto);
+            setHostCanvas(refreshed);
+            lastSavedPlanStepsRef.current = JSON.stringify(
+              refreshed.plan.steps,
+            );
+            restore(graphFromHostCanvas(refreshed, locale, catalog));
+            setAnnouncement(
+              locale === 'zh' ? 'AI 已给出新方案' : 'The AI drafted a new plan',
+            );
+            return;
+          }
+        }
+        setAnnouncement(
+          locale === 'zh'
+            ? '重新规划超时，请稍后刷新查看'
+            : 'Re-planning is taking long; refresh later',
+        );
+      })
+      .catch((error: unknown) => {
+        setAnnouncement(error instanceof Error ? error.message : String(error));
+      })
+      .finally(() => setHostBusy(false));
+  }, [catalog, editRevision, graph, hostCanvas, hostMode, locale, restore]);
+
   const saveToHost = useCallback(() => {
     if (!hostMode || !hostCanvas) return;
     if (!hostRunEditActions(hostCanvas).save) return;
@@ -1927,6 +2005,13 @@ function WorkflowPlaygroundSurface({
           hostOpenGate ? () => setGateDialogOpen(true) : undefined
         }
         planWarnings={hostCanvas?.plan_check_problems ?? []}
+        planOrigin={hostCanvas?.plan_origin}
+        onSelectPlanStep={(stepId) => {
+          setSelectedNodeId(stepId);
+          setSelectedEdgeId(undefined);
+          setActivePanel('settings');
+        }}
+        onHostReplan={hostEdits?.save ? replanOnHost : undefined}
         onHostSave={hostEdits?.save ? saveToHost : undefined}
         onOpenDocument={openDocument}
         onOpenExtensions={toggleExtensions}
@@ -2319,6 +2404,49 @@ function WorkflowPlaygroundSurface({
             }
             onRunNode={(nodeId) => void runNode(nodeId)}
             selectedNode={selectedNode}
+            hostStepEditor={
+              hostMode && selectedNode && hostStepEditorKind(selectedNode) ? (
+                <WorkflowPlaygroundHostStepEditor
+                  graph={graph}
+                  locale={locale}
+                  node={selectedNode}
+                  onApprovalInputs={(nodeId, inputs) =>
+                    commit((current) => ({
+                      ...current,
+                      nodes: hostWithApprovalInputs(current, nodeId, inputs),
+                    }))
+                  }
+                  onConditionInput={(nodeId, source) =>
+                    commit((current) => ({
+                      ...current,
+                      nodes: hostWithConditionInput(current, nodeId, source),
+                    }))
+                  }
+                  onOtherwise={(nodeId, targets) =>
+                    commit((current) => ({
+                      ...current,
+                      edges: hostRewireOtherwise(
+                        current,
+                        nodeId,
+                        targets,
+                        (source, sourceHandle, target) =>
+                          createPlaygroundEdge(
+                            {
+                              source,
+                              sourceHandle,
+                              target,
+                              targetHandle: 'in',
+                            },
+                            current.nodes,
+                            locale,
+                            catalog.registry,
+                          ),
+                      ),
+                    }))
+                  }
+                />
+              ) : undefined
+            }
           />
         )}
 

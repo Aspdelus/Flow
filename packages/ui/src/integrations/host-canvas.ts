@@ -22,9 +22,10 @@ export type JsonObject = Record<string, unknown>;
 export type HostPlanStepNode = {
   id: string;
   kind: 'host.plan-step.v1';
-  agent_id: unknown;
+  /** Agent steps only; a control-flow step binds no agent. */
+  agent_id?: unknown;
   objective: unknown;
-  capabilities: unknown;
+  capabilities?: unknown;
   depends_on: unknown[];
   plan_step: JsonObject;
 };
@@ -77,6 +78,9 @@ export type HostCanvasDocument = {
    * only warnings reach a verified proposal. Empty when the host predates
    * plan checks or the plan is an edited overlay. */
   plan_check_problems: HostPlanProblem[];
+  /** `human_edit` once a person saved an edit of this plan (the proposal's own
+   * `edit_origin`); the approver then reviews the edited version. */
+  plan_origin: 'orchestrator' | 'human_edit';
   save: {
     method: 'POST';
     path: string;
@@ -284,6 +288,7 @@ export function canvasDocumentFromProposalDto(
       resume_path: '/v1/hooks/{token}/resume',
     },
     plan_check_problems: planCheckProblems(dto.plan_check),
+    plan_origin: dto.plan_origin === 'human_edit' ? 'human_edit' : 'orchestrator',
     save: {
       method: 'POST',
       path: `/v1/runs/${runId}/plan-edits`,
