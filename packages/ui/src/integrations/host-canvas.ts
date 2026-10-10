@@ -316,6 +316,91 @@ function stableTopologicalOrder(
 }
 
 /** Replace steps/execution_order from canvas nodes; never from DSL. */
+/** One `host.plan-edge.v1` edge, exactly as the host derives it. */
+export type PlanEdgeView = {
+  schema_version: 'host.plan-edge.v1';
+  from: string;
+  to: string;
+  output: string | null;
+  branch?: string;
+};
+
+function stringItems(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === 'string')
+    : [];
+}
+
+/** The output ports of a step: an iteration's and a loop's are implicit. */
+function stepOutputs(step: JsonObject | undefined): string[] {
+  if (step?.kind === 'iteration') return ['item', 'results'];
+  if (step?.kind === 'loop') return ['previous', 'feedback', 'result', 'status'];
+  return stringItems(step?.outputs);
+}
+
+/**
+ * The plan edges the host derives from a set of steps (`PlanGraph::from_steps`
+ * in orchestrator-core): a data edge per `inputs` reference to a declared
+ * upstream output, an ordering edge per `depends_on`, and a branch edge from
+ * a condition to each step its cases / `otherwise` route to, from an agent
+ * step to its `on_timeout` fallbacks, and from an iteration or loop to its `body`
+ * (each replaces an ordering edge on the same pair).  Sorted like the host,
+ * so an unedited plan round-trips byte-identical.
+ */
+export function planEdgesFromSteps(steps: readonly JsonObject[]): PlanEdgeView[] {
+  const byId = new Map(steps.map((step) => [String(step.step_id ?? ''), step]));
+  const edges = new Map<string, PlanEdgeView>();
+  const add = (edge: PlanEdgeView) =>
+    edges.set(`${edge.from}\u0000${edge.to}\u0000${edge.output ?? ''}\u0000${edge.branch ?? ''}`, edge);
+  for (const step of steps) {
+    const to = String(step.step_id ?? '');
+    for (const reference of stringItems(step.inputs)) {
+      const separator = reference.lastIndexOf('.');
+      if (separator <= 0) continue;
+      const from = reference.slice(0, separator);
+      const port = reference.slice(separator + 1);
+      if (from === 'task' || !stepOutputs(byId.get(from)).includes(port)) continue;
+      add({ schema_version: 'host.plan-edge.v1', from, to, output: port });
+    }
+    for (const from of stringItems(step.depends_on)) {
+      if (byId.has(from)) add({ schema_version: 'host.plan-edge.v1', from, to, output: null });
+    }
+  }
+  for (const step of steps) {
+    const from = String(step.step_id ?? '');
+    // An agent step's on_timeout fallbacks, an iteration's or loop's body, or
+    // a condition's cases / otherwise.
+    const timeouts = stringItems(step.on_timeout);
+    let branches: [string, string][];
+    if (timeouts.length > 0) {
+      branches = timeouts.map((target): [string, string] => ['timeout', target]);
+    } else if (step.kind === 'iteration' || step.kind === 'loop') {
+      branches = stringItems(step.body).map((target): [string, string] => ['body', target]);
+    } else if (step.kind === 'condition') {
+      const cases = Array.isArray(step.cases) ? (step.cases as JsonObject[]) : [];
+      branches = cases.flatMap((item, index) =>
+        stringItems(item?.then).map((target): [string, string] => [`case:${index}`, target]),
+      );
+      branches.push(...stringItems(step.otherwise).map((target): [string, string] => ['otherwise', target]));
+    } else {
+      continue;
+    }
+    for (const [branch, to] of branches) {
+      if (!byId.has(to)) continue;
+      edges.delete(`${from}\u0000${to}\u0000\u0000`);
+      add({ schema_version: 'host.plan-edge.v1', from, to, output: null, branch });
+    }
+  }
+  const key = (edge: PlanEdgeView) => [edge.from, edge.to, edge.output ?? '', edge.branch ?? ''];
+  return [...edges.values()].sort((a, b) => {
+    const [ka, kb] = [key(a), key(b)];
+    for (let index = 0; index < ka.length; index += 1) {
+      if (ka[index] !== kb[index]) return ka[index] < kb[index] ? -1 : 1;
+    }
+    return 0;
+  });
+}
+
 export function applyCanvasNodeEdits(
   canvas: HostCanvasDocument,
   nodes: HostPlanStepNode[],
@@ -326,7 +411,6 @@ export function applyCanvasNodeEdits(
   const plan: JsonObject = { ...(canvas.plan ?? {}) };
   const steps: JsonObject[] = [];
   const stepIds: string[] = [];
-  const edges: { from: string; to: string }[] = [];
   for (const node of nodes) {
     const step: JsonObject = { ...(node.plan_step ?? {}) };
     step.step_id = node.id || step.step_id;
@@ -336,12 +420,8 @@ export function applyCanvasNodeEdits(
     if ('depends_on' in node) step.depends_on = node.depends_on;
     steps.push(step);
     stepIds.push(String(step.step_id));
-    for (const dep of Array.isArray(node.depends_on) ? node.depends_on : []) {
-      if (typeof dep === 'string' && dep) {
-        edges.push({ from: dep, to: String(step.step_id) });
-      }
-    }
   }
+  const edges = planEdgesFromSteps(steps);
   const order = stableTopologicalOrder(stepIds, edges);
   if (!order) {
     throw new HostCanvasError(

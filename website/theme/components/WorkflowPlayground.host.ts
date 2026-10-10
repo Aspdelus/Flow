@@ -454,6 +454,8 @@ export type HostRunExecution = {
   nodeStatuses: Record<string, HostNodeRuntimeStatus>;
   /** Plan step ids whose latest attempt is running right now. */
   runningStepIds: string[];
+  /** Steps a condition routed around (from the run output once it ends). */
+  skippedStepIds: string[];
   completedStepCount: number;
   failedStepCount: number;
 };
@@ -472,6 +474,20 @@ export function isHostRunExecutionActive(status: string): boolean {
 // recovery_flow_step_id). Everything else (`orchestrator.plan`,
 // `orchestrator.plan.r1`, ...) has no canvas node.
 const AGENT_FLOW_STEP_ID = /^agent:(.+?)(?:\.retry(\d+))?$/;
+// A condition records its branch as host step `cond:<step_id>`; an approval
+// step waits on hook `gate:<step_id>` (adapters/flow-host/src/control_flow.rs).
+const CONDITION_FLOW_STEP_ID = /^cond:(.+)$/;
+// An iteration runs body step <b> for item <i> as `agent:<b>@<i>`, parses its
+// items as `iter:<id>` and collects them as `iter:<id>.results`; a loop runs
+// round <r> as `agent:<b>#<r>`, decides it as `loop:<id>@<r>` and ends as
+// `loop:<id>`.
+const BODY_FLOW_STEP_ID = /^agent:(.+)[@#](\d+)$/;
+const ITERATION_FLOW_STEP_ID = /^iter:(.+?)(\.results)?$/;
+const LOOP_FLOW_STEP_ID = /^loop:(.+?)(@\d+)?$/;
+// Upper bound of a condition's cases (orchestrator-core CONDITION_CASE_LIMIT):
+// every case node of the chain (hostConditionNodeIds) shares one status.
+const CONDITION_CASE_LIMIT = 8;
+
 function nodeStatusFromFlowStepStatus(status: string): HostNodeRuntimeStatus {
   switch (status.toLowerCase()) {
     case 'running':
@@ -499,13 +515,21 @@ export function hostRunExecutionFromSnapshot(
   // `agent:x.retry1` must read as running, not failed.
   const latest = new Map<string, { attempt: number; status: string }>();
   for (const [flowStepId, step] of Object.entries(steps)) {
+    if (BODY_FLOW_STEP_ID.test(flowStepId)) continue;
     const match = AGENT_FLOW_STEP_ID.exec(flowStepId);
     if (!match || !isRecord(step) || typeof step.status !== 'string') continue;
     const stepId = match[1];
     const attempt = match[2] === undefined ? 0 : Number(match[2]);
     const previous = latest.get(stepId);
     if (!previous || attempt >= previous.attempt) {
-      latest.set(stepId, { attempt, status: step.status });
+      // A step past its own deadline completes in Flow but produced nothing
+      // (adapters/flow-host TIMED_OUT_STATUS); its fallback ran instead.
+      const timedOut =
+        isRecord(step.output) && step.output.status === 'timed_out';
+      latest.set(stepId, {
+        attempt,
+        status: timedOut ? 'failed' : step.status,
+      });
     }
   }
   const nodeStatuses: Record<string, HostNodeRuntimeStatus> = {};
@@ -519,6 +543,100 @@ export function hostRunExecutionFromSnapshot(
     if (nodeStatus === 'success') completedStepCount += 1;
     if (nodeStatus === 'error') failedStepCount += 1;
   }
+  for (const [flowStepId, step] of Object.entries(steps)) {
+    const match = CONDITION_FLOW_STEP_ID.exec(flowStepId);
+    if (!match || !isRecord(step) || typeof step.status !== 'string') continue;
+    const nodeStatus = nodeStatusFromFlowStepStatus(step.status);
+    for (const nodeId of hostConditionNodeIds(match[1], CONDITION_CASE_LIMIT)) {
+      nodeStatuses[nodeId] = nodeStatus;
+    }
+    if (nodeStatus === 'success') completedStepCount += 1;
+  }
+  // A body step reads as all its items together: running while any runs,
+  // failed if any item failed, done once every dispatched item is.
+  const bodyItems = new Map<string, string[]>();
+  const iterationParts = new Map<
+    string,
+    { items?: string; results?: string }
+  >();
+  for (const [flowStepId, step] of Object.entries(steps)) {
+    if (!isRecord(step) || typeof step.status !== 'string') continue;
+    const body = BODY_FLOW_STEP_ID.exec(flowStepId);
+    if (body) {
+      bodyItems.set(body[1], [
+        ...(bodyItems.get(body[1]) ?? []),
+        nodeStatusFromFlowStepStatus(step.status),
+      ]);
+      continue;
+    }
+    const iteration = ITERATION_FLOW_STEP_ID.exec(flowStepId);
+    if (iteration) {
+      const parts = iterationParts.get(iteration[1]) ?? {};
+      parts[iteration[2] ? 'results' : 'items'] = nodeStatusFromFlowStepStatus(
+        step.status,
+      );
+      iterationParts.set(iteration[1], parts);
+    }
+  }
+  for (const [stepId, statuses] of bodyItems) {
+    const nodeStatus: HostNodeRuntimeStatus = statuses.includes('running')
+      ? 'running'
+      : statuses.includes('error')
+        ? 'error'
+        : statuses.every((item) => item === 'success')
+          ? 'success'
+          : 'waiting';
+    nodeStatuses[stepId] = nodeStatus;
+    if (nodeStatus === 'running') runningStepIds.push(stepId);
+    if (nodeStatus === 'success') completedStepCount += 1;
+    if (nodeStatus === 'error') failedStepCount += 1;
+  }
+  const loopParts = new Map<
+    string,
+    { rounds: HostNodeRuntimeStatus[]; result?: HostNodeRuntimeStatus }
+  >();
+  for (const [flowStepId, step] of Object.entries(steps)) {
+    const loop = LOOP_FLOW_STEP_ID.exec(flowStepId);
+    if (!loop || !isRecord(step) || typeof step.status !== 'string') continue;
+    const parts = loopParts.get(loop[1]) ?? { rounds: [] };
+    if (loop[2]) parts.rounds.push(nodeStatusFromFlowStepStatus(step.status));
+    else parts.result = nodeStatusFromFlowStepStatus(step.status);
+    loopParts.set(loop[1], parts);
+  }
+  for (const [stepId, { rounds, result }] of loopParts) {
+    const nodeStatus: HostNodeRuntimeStatus =
+      result === 'success'
+        ? 'success'
+        : result === 'error' || rounds.includes('error')
+          ? 'error'
+          : 'running';
+    nodeStatuses[stepId] = nodeStatus;
+    nodeStatuses[hostLoopStartId(stepId)] = nodeStatus;
+    if (nodeStatus === 'success') completedStepCount += 1;
+  }
+  for (const [stepId, { items, results }] of iterationParts) {
+    const nodeStatus: HostNodeRuntimeStatus =
+      results === 'success'
+        ? 'success'
+        : items === 'error' || results === 'error'
+          ? 'error'
+          : 'running';
+    nodeStatuses[stepId] = nodeStatus;
+    nodeStatuses[hostIterationStartId(stepId)] =
+      items === 'success' ? 'success' : nodeStatus;
+    if (nodeStatus === 'success') completedStepCount += 1;
+  }
+  // A plan's fail step records `FAILED_BY_PLAN <step_id>: <reason>`
+  // (adapters/flow-host control_flow.rs PLAN_FAILURE_PREFIX).
+  const planFailure =
+    typeof record.error === 'string'
+      ? /^FAILED_BY_PLAN (\S+):/.exec(record.error)
+      : null;
+  if (planFailure) nodeStatuses[planFailure[1]] = 'error';
+  const output = isRecord(record.output) ? record.output : {};
+  const skippedStepIds = Array.isArray(output.skipped_steps)
+    ? output.skipped_steps.filter((id): id is string => typeof id === 'string')
+    : [];
   runningStepIds.sort();
   if (latest.size > 0) nodeStatuses.start = 'success';
   if (status === 'completed') nodeStatuses.done = 'success';
@@ -529,6 +647,7 @@ export function hostRunExecutionFromSnapshot(
     status,
     nodeStatuses,
     runningStepIds,
+    skippedStepIds,
     completedStepCount,
     failedStepCount,
   };
@@ -716,26 +835,41 @@ export function graphFromHostFlowDsl(
   return { nodes, edges, annotations: [] };
 }
 
-/** Order-independent `step_id -> sorted depends_on` signature for a set of
- * AgentPlan steps, restricted to dependencies that name another step in the
- * same set (mirrors graphFromHostFlowDsl/hostCanvasFromGraph's own filtering
- * of dangling/foreign dependency ids). */
+/** Step ids `step` runs after, the way the host derives plan edges
+ * (`orchestrator-core` `PlanStep::upstream_steps`): the source of every
+ * `inputs` reference (`<step>.<port>`, excluding `task.*`) plus every
+ * `depends_on` entry, restricted to steps in `stepIds`. A plan may express a
+ * dependency through `inputs` alone; ignoring those would draw data-dependent
+ * steps as independent fan-outs from `start`. */
+function planStepUpstream(step: JsonObject, stepIds: Set<string>): string[] {
+  const upstream = new Set<string>();
+  for (const reference of Array.isArray(step.inputs) ? step.inputs : []) {
+    if (typeof reference !== 'string') continue;
+    const separator = reference.lastIndexOf('.');
+    if (separator <= 0) continue;
+    const source = reference.slice(0, separator);
+    if (source !== 'task' && stepIds.has(source)) upstream.add(source);
+  }
+  for (const dependency of Array.isArray(step.depends_on)
+    ? step.depends_on
+    : []) {
+    if (typeof dependency === 'string' && stepIds.has(dependency)) {
+      upstream.add(dependency);
+    }
+  }
+  upstream.delete(String(step.step_id ?? ''));
+  return Array.from(upstream).sort();
+}
+
+/** Order-independent `step_id -> sorted upstream steps` signature for a set
+ * of AgentPlan steps (see [[planStepUpstream]]), comparable with
+ * [[dslGraphDependencySignature]]. */
 function planStepsDependencySignature(steps: JsonObject[]): string {
   const stepIds = new Set(steps.map((step) => String(step.step_id ?? '')));
   return steps
     .map((step) => {
       const stepId = String(step.step_id ?? '');
-      const dependsOn = Array.isArray(step.depends_on)
-        ? Array.from(
-            new Set(
-              step.depends_on.filter(
-                (dep): dep is string =>
-                  typeof dep === 'string' && stepIds.has(dep),
-              ),
-            ),
-          ).sort()
-        : [];
-      return `${stepId}<-${dependsOn.join(',')}`;
+      return `${stepId}<-${planStepUpstream(step, stepIds).join(',')}`;
     })
     .sort()
     .join('|');
@@ -767,6 +901,91 @@ function dslGraphDependencySignature(graph: PlaygroundGraphState): string {
     )
     .sort()
     .join('|');
+}
+
+function hostStringItems(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === 'string')
+    : [];
+}
+
+/** A condition step's cases as `{label, then}` (see orchestrator-core `StepKind::Condition`). */
+function hostConditionCases(
+  step: JsonObject,
+): { label: string; then: string[] }[] {
+  const cases = Array.isArray(step.cases) ? (step.cases as JsonObject[]) : [];
+  return cases.map((item) => ({
+    label: typeof item?.label === 'string' ? item.label : '',
+    then: hostStringItems(item?.then),
+  }));
+}
+
+/** Canvas node ids of one condition step: a `flow.condition` per case, the
+ * first one carrying the plan step's own id; later cases hang off the
+ * previous one's `otherwise`.  `~` never occurs in a plan step id. */
+export function hostConditionNodeIds(
+  stepId: string,
+  caseCount: number,
+): string[] {
+  return Array.from({ length: Math.max(caseCount, 1) }, (_, index) =>
+    index === 0 ? stepId : `${stepId}~${index}`,
+  );
+}
+
+function hostConditionOwner(nodeId: string): string {
+  const separator = nodeId.indexOf('~');
+  return separator < 0 ? nodeId : nodeId.slice(0, separator);
+}
+
+function hostConditionTitle(
+  locale: FlowWebsiteLocale,
+  caseIndex: number,
+): string {
+  if (caseIndex === 0) return locale === 'zh' ? '条件分支' : 'Condition';
+  return locale === 'zh' ? '条件分支（续）' : 'Condition (cont.)';
+}
+
+function hostOtherwiseLabel(locale: FlowWebsiteLocale): string {
+  return locale === 'zh' ? '其他' : 'otherwise';
+}
+
+function hostTimeoutLabel(locale: FlowWebsiteLocale): string {
+  return locale === 'zh' ? '超时' : 'on timeout';
+}
+
+function hostFailTitle(locale: FlowWebsiteLocale): string {
+  return locale === 'zh' ? '终止' : 'Stop';
+}
+
+function hostApprovalTitle(locale: FlowWebsiteLocale): string {
+  return locale === 'zh' ? '人工审批' : 'Human approval';
+}
+
+function hostIterationTitle(
+  locale: FlowWebsiteLocale,
+  step: JsonObject,
+): string {
+  const max = typeof step.max_items === 'number' ? step.max_items : 20;
+  return locale === 'zh'
+    ? `逐项处理（最多 ${max} 项）`
+    : `For each item (up to ${max})`;
+}
+
+/** The `iteration-start` child of an iteration step's container: the current item. */
+export function hostIterationStartId(stepId: string): string {
+  return `${stepId}~item`;
+}
+
+function hostLoopTitle(locale: FlowWebsiteLocale, step: JsonObject): string {
+  const max = typeof step.max_rounds === 'number' ? step.max_rounds : 5;
+  return locale === 'zh'
+    ? `反复修改直到通过（最多 ${max} 轮）`
+    : `Revise until it passes (up to ${max} rounds)`;
+}
+
+/** The `loop-start` child of a loop step's container: this round's inputs. */
+export function hostLoopStartId(stepId: string): string {
+  return `${stepId}~round`;
 }
 
 export function graphFromHostCanvas(
@@ -806,7 +1025,6 @@ export function graphFromHostCanvas(
   }
 
   const registry = catalog.registry;
-  const stepType = 'flow.step';
   const nodes: PlaygroundNode[] = [];
   const start = createPlaygroundNode(
     'start',
@@ -829,14 +1047,163 @@ export function graphFromHostCanvas(
   const stepIds = new Set(
     steps.map((step, index) => String(step.step_id ?? `step-${index + 1}`)),
   );
+  const markHost = (node: PlaygroundNode, step: JsonObject) => {
+    node.data = {
+      ...node.data,
+      hostPlanStep: step,
+      hostAuthority: true,
+      hostExecutionDigest: canvas.preview_only.execution_digest,
+    };
+  };
+  // Where each plan step's outgoing edges leave from: a condition's branches
+  // leave from its chain of `flow.condition` nodes (one per case, see
+  // hostConditionNodeIds); everything else from its own node.
+  const typeOf = new Map<string, string>();
+  // An iteration (loop) step is a Flow `iteration` (`loop`) container: its
+  // body steps sit inside it after its start child (the current item; this
+  // round's previous result and feedback), and the steps that read its
+  // results follow its `done` port.
+  const bodyOwner = new Map<string, string>();
+  const scopeStart = new Map<string, string>();
+  for (const step of steps) {
+    if (step.kind !== 'iteration' && step.kind !== 'loop') continue;
+    const stepId = String(step.step_id ?? '');
+    scopeStart.set(
+      stepId,
+      step.kind === 'loop'
+        ? hostLoopStartId(stepId)
+        : hostIterationStartId(stepId),
+    );
+    for (const member of hostStringItems(step.body))
+      bodyOwner.set(member, stepId);
+  }
+  // Children go after every container, so React Flow sees each parent first.
+  const bodyNodes: PlaygroundNode[] = [];
   steps.forEach((step, index) => {
     const stepId = String(step.step_id ?? `step-${index + 1}`);
     const objective =
       typeof step.objective === 'string' ? step.objective : stepId;
+    if (step.kind === 'iteration' || step.kind === 'loop') {
+      const loop = step.kind === 'loop';
+      const startId = scopeStart.get(stepId) ?? hostIterationStartId(stepId);
+      const node = createPlaygroundNode(
+        stepId,
+        step.kind,
+        { x: 0, y: 0 },
+        locale,
+        {
+          configuration: loop
+            ? {
+                title: hostLoopTitle(locale, step),
+                desc: objective,
+                start_node_id: startId,
+                ...(typeof step.max_rounds === 'number'
+                  ? { max_iterations: step.max_rounds }
+                  : {}),
+              }
+            : {
+                title: hostIterationTitle(locale, step),
+                desc: objective,
+                start_node_id: startId,
+              },
+          registry,
+        },
+      );
+      markHost(node, step);
+      typeOf.set(stepId, step.kind);
+      nodes.push(node);
+      const start = createPlaygroundNode(
+        startId,
+        `${step.kind}-start`,
+        { x: 0, y: 0 },
+        locale,
+        {
+          configuration: loop
+            ? {
+                title: locale === 'zh' ? '本轮输入' : 'This round',
+                desc: `${stepId}.previous / ${stepId}.feedback`,
+              }
+            : {
+                title: locale === 'zh' ? '当前条目' : 'Current item',
+                desc: `${stepId}.item`,
+              },
+          parentId: stepId,
+          registry,
+        },
+      );
+      start.data = { ...start.data, hostIterationPart: stepId };
+      typeOf.set(start.id, `${step.kind}-start`);
+      nodes.push(start);
+      return;
+    }
+    if (step.kind === 'condition') {
+      const cases = hostConditionCases(step);
+      hostConditionNodeIds(stepId, cases.length).forEach(
+        (nodeId, caseIndex) => {
+          const node = createPlaygroundNode(
+            nodeId,
+            'flow.condition',
+            { x: 0, y: 0 },
+            locale,
+            {
+              configuration: {
+                title: hostConditionTitle(locale, caseIndex),
+                desc: objective,
+                matched_label: cases[caseIndex].label,
+                otherwise_label: hostOtherwiseLabel(locale),
+              },
+              registry,
+            },
+          );
+          if (caseIndex === 0) markHost(node, step);
+          else node.data = { ...node.data, hostConditionPart: stepId };
+          typeOf.set(nodeId, 'flow.condition');
+          nodes.push(node);
+        },
+      );
+      return;
+    }
+    if (step.kind === 'fail') {
+      const node = createPlaygroundNode(
+        stepId,
+        'flow.fail',
+        { x: 0, y: 0 },
+        locale,
+        {
+          configuration: { title: hostFailTitle(locale), desc: objective },
+          registry,
+        },
+      );
+      markHost(node, step);
+      typeOf.set(stepId, 'flow.fail');
+      nodes.push(node);
+      return;
+    }
+    if (step.kind === 'approval') {
+      const node = createPlaygroundNode(
+        stepId,
+        'flow.hook',
+        { x: 0, y: 0 },
+        locale,
+        {
+          configuration: {
+            title: hostApprovalTitle(locale),
+            desc: objective,
+            kind: 'human_approval',
+            subject: objective,
+          },
+          registry,
+        },
+      );
+      markHost(node, step);
+      typeOf.set(stepId, 'flow.hook');
+      nodes.push(node);
+      return;
+    }
     const agentId = typeof step.agent_id === 'string' ? step.agent_id : 'agent';
     const node = createPlaygroundNode(
       stepId,
-      stepType,
+      'flow.step',
       { x: 0, y: 0 },
       locale,
       {
@@ -849,17 +1216,15 @@ export function graphFromHostCanvas(
             ? { version: step.version }
             : {}),
         },
+        parentId: bodyOwner.get(stepId),
         registry,
       },
     );
-    node.data = {
-      ...node.data,
-      hostPlanStep: step,
-      hostAuthority: true,
-      hostExecutionDigest: canvas.preview_only.execution_digest,
-    };
-    nodes.push(node);
+    markHost(node, step);
+    typeOf.set(stepId, 'flow.step');
+    (bodyOwner.has(stepId) ? bodyNodes : nodes).push(node);
   });
+  nodes.push(...bodyNodes);
 
   const done = createPlaygroundNode(
     'done',
@@ -868,73 +1233,146 @@ export function graphFromHostCanvas(
     locale,
     {
       configuration: {
-        title: locale === 'zh' ? '完成' : 'Complete',
-        desc: locale === 'zh' ? '预览终点（只读 DSL 投影）' : 'Preview sink',
+        title: hostDoneTitle(locale),
+        desc: hostDoneDesc(locale),
       },
       registry,
     },
   );
   nodes.push(done);
 
-  // Build the DAG from each step's own `depends_on` -- never from array
-  // order. A step with an empty `depends_on` fans out from `start`; a step
-  // that nothing else depends on fans into `done`. `controlSourceHandle`
-  // returns a single stable id per source type (`success` for `flow.step`,
-  // `next` for `flow.start`), which React Flow lets fan out to any number of
-  // targets, so multiple steps can share the same entry point and multiple
-  // predecessors can converge on the same step without any handle conflict.
+  // Build the DAG from each step's own upstream steps (`inputs` sources and
+  // `depends_on`, see planStepUpstream) -- never from array order -- plus each
+  // condition's branches (`matched` of case n, `otherwise` of the last case).
+  // A step with no upstream fans out from `start`; a step that nothing else
+  // depends on fans into `done`. `controlSourceHandle` returns a single stable
+  // id per source type (`success` for `flow.step`, `next` for `flow.start`),
+  // which React Flow lets fan out to any number of targets, so multiple steps
+  // can share the same entry point and multiple predecessors can converge on
+  // the same step without any handle conflict.
+  const branchSource = new Map<
+    string,
+    { node: string; handle: string; label?: string }
+  >();
+  const conditionIds = new Set<string>();
+  // An agent step's on_timeout fallbacks hang off it on an edge labelled as
+  // the timeout branch (they run only if it misses its own deadline).
+  for (const step of steps) {
+    const stepId = String(step.step_id ?? '');
+    for (const target of hostStringItems(step.on_timeout)) {
+      branchSource.set(target, {
+        node: stepId,
+        handle: controlSourceHandle('flow.step', registry),
+        label: hostTimeoutLabel(locale),
+      });
+    }
+  }
+  for (const step of steps) {
+    if (step.kind !== 'condition') continue;
+    const stepId = String(step.step_id ?? '');
+    conditionIds.add(stepId);
+    const cases = hostConditionCases(step);
+    const chain = hostConditionNodeIds(stepId, cases.length);
+    cases.forEach((item, caseIndex) => {
+      for (const target of item.then) {
+        branchSource.set(target, { node: chain[caseIndex], handle: 'matched' });
+      }
+    });
+    for (const target of hostStringItems(step.otherwise)) {
+      branchSource.set(target, {
+        node: chain[chain.length - 1],
+        handle: 'otherwise',
+      });
+    }
+  }
   const dependedOn = new Set<string>();
   const edges = [];
-  const hasIn = new Set<string>();
+  const edge = (
+    source: string,
+    sourceHandle: string,
+    target: string,
+    labelOverride?: string,
+  ) =>
+    createPlaygroundEdge(
+      { source, sourceHandle, target, targetHandle: 'in' },
+      nodes,
+      locale,
+      registry,
+      labelOverride ? { labelOverride } : {},
+    );
+  for (const step of steps) {
+    if (step.kind !== 'condition') continue;
+    const chain = hostConditionNodeIds(
+      String(step.step_id ?? ''),
+      hostConditionCases(step).length,
+    );
+    for (let index = 1; index < chain.length; index += 1) {
+      edges.push(edge(chain[index - 1], 'otherwise', chain[index]));
+    }
+  }
   steps.forEach((step) => {
     const stepId = String(step.step_id ?? '');
     if (!stepId) return;
-    const dependsOn = Array.isArray(step.depends_on)
-      ? step.depends_on.filter(
-          (dep): dep is string => typeof dep === 'string' && stepIds.has(dep),
-        )
-      : [];
-    const sources = dependsOn.length > 0 ? dependsOn : ['start'];
+    const iteration = bodyOwner.get(stepId);
+    if (iteration) {
+      // Inside the container: from the body steps it reads, else the current item.
+      const inner = planStepUpstream(step, stepIds).filter(
+        (source) => bodyOwner.get(source) === iteration,
+      );
+      for (const source of inner.length > 0
+        ? inner
+        : [scopeStart.get(iteration) ?? hostIterationStartId(iteration)]) {
+        edges.push(
+          edge(
+            source,
+            controlSourceHandle(typeOf.get(source) ?? 'flow.step', registry),
+            stepId,
+          ),
+        );
+      }
+      return;
+    }
+    const branch = branchSource.get(stepId);
+    const owner = branch ? hostConditionOwner(branch.node) : undefined;
+    const dependsOn = planStepUpstream(step, stepIds).filter(
+      (source) => source !== owner,
+    );
+    if (branch && owner) {
+      dependedOn.add(owner);
+      edges.push(edge(branch.node, branch.handle, stepId, branch.label));
+    }
+    const sources = dependsOn.length > 0 || branch ? dependsOn : ['start'];
     for (const source of sources) {
       if (source !== 'start') dependedOn.add(source);
       edges.push(
-        createPlaygroundEdge(
-          {
-            source,
-            sourceHandle:
-              source === 'start'
-                ? controlSourceHandle('flow.start', registry)
-                : controlSourceHandle(stepType, registry),
-            target: stepId,
-            targetHandle: 'in',
-          },
-          nodes,
-          locale,
-          registry,
+        edge(
+          source,
+          source === 'start'
+            ? controlSourceHandle('flow.start', registry)
+            : controlSourceHandle(typeOf.get(source) ?? 'flow.step', registry),
+          stepId,
         ),
       );
-      hasIn.add(stepId);
     }
   });
   const leaves = steps
     .map((step) => String(step.step_id ?? ''))
-    .filter((stepId) => stepId && !dependedOn.has(stepId));
+    .filter(
+      (stepId) =>
+        stepId &&
+        !dependedOn.has(stepId) &&
+        !conditionIds.has(stepId) &&
+        !bodyOwner.has(stepId),
+    );
   const sinks = leaves.length > 0 ? leaves : ['start'];
   for (const source of sinks) {
     edges.push(
-      createPlaygroundEdge(
-        {
-          source,
-          sourceHandle:
-            source === 'start'
-              ? controlSourceHandle('flow.start', registry)
-              : controlSourceHandle(stepType, registry),
-          target: 'done',
-          targetHandle: 'in',
-        },
-        nodes,
-        locale,
-        registry,
+      edge(
+        source,
+        source === 'start'
+          ? controlSourceHandle('flow.start', registry)
+          : controlSourceHandle(typeOf.get(source) ?? 'flow.step', registry),
+        'done',
       ),
     );
   }
@@ -964,6 +1402,25 @@ export function hostCanvasFromGraph(
   graph: PlaygroundGraphState,
 ): HostCanvasDocument {
   const nodes: HostPlanStepNode[] = [];
+  // Canvas nodes of condition steps (each case's `flow.condition`): their
+  // edges are branches, carried by the condition's own `cases`/`otherwise`,
+  // never ordering dependencies of the targets.
+  const conditionNodes = new Set(
+    graph.nodes
+      .filter(
+        (node) =>
+          typeof node.data.hostConditionPart === 'string' ||
+          (node.data.hostPlanStep as JsonObject | undefined)?.kind ===
+            'condition',
+      )
+      .map((node) => node.id),
+  );
+  // An iteration's `iteration-start` child stands for its current item, never a step.
+  const iterationParts = new Set(
+    graph.nodes
+      .filter((node) => typeof node.data.hostIterationPart === 'string')
+      .map((node) => node.id),
+  );
   for (const node of graph.nodes) {
     const planStep = node.data.hostPlanStep;
     if (!planStep || typeof planStep !== 'object') continue;
@@ -976,7 +1433,27 @@ export function hostCanvasFromGraph(
     // fan-out/fan-in structure drawn on the canvas (by hand or by Copilot's
     // applyCopilotSteps, which also goes through graphFromHostCanvas) round-
     // trip back into the saved plan instead of silently reverting to
-    // whatever the node was last created with.
+    // whatever the node was last created with.  An edge the step's `inputs`
+    // already imply is not an extra `depends_on` (unless the step had it),
+    // so an unedited plan saves byte-identical.
+    const implied = new Set(
+      hostStringItems(step.inputs)
+        .map((reference) =>
+          reference.slice(0, Math.max(reference.lastIndexOf('.'), 0)),
+        )
+        .filter((source) => source && source !== 'task'),
+    );
+    const declared = new Set(hostStringItems(step.depends_on));
+    // A step whose on_timeout names this one: that edge is the timeout branch.
+    const timeoutOwners = new Set(
+      graph.nodes
+        .filter((other) =>
+          hostStringItems(
+            (other.data.hostPlanStep as JsonObject | undefined)?.on_timeout,
+          ).includes(node.id),
+        )
+        .map((other) => other.id),
+    );
     const dependsOn = Array.from(
       new Set(
         graph.edges
@@ -984,7 +1461,14 @@ export function hostCanvasFromGraph(
             (edge) => edge.target === node.id && edge.targetHandle === 'in',
           )
           .map((edge) => edge.source)
-          .filter((source) => source !== 'start'),
+          .filter(
+            (source) =>
+              source !== 'start' &&
+              !conditionNodes.has(source) &&
+              !timeoutOwners.has(source) &&
+              !iterationParts.has(source),
+          )
+          .filter((source) => declared.has(source) || !implied.has(source)),
       ),
     );
     step.depends_on = dependsOn;
@@ -998,6 +1482,17 @@ export function hostCanvasFromGraph(
       plan_step: step,
     });
   }
+  // Keep the plan's own step order (an iteration's body nodes are drawn after
+  // every container); steps added on the canvas follow in canvas order.
+  const planOrder = new Map(
+    (Array.isArray(canvas.plan.steps)
+      ? (canvas.plan.steps as JsonObject[])
+      : []
+    ).map((step, index) => [String(step.step_id ?? ''), index]),
+  );
+  const rank = (node: HostPlanStepNode) =>
+    planOrder.get(node.id) ?? Number.MAX_SAFE_INTEGER;
+  nodes.sort((a, b) => rank(a) - rank(b));
   return applyCanvasNodeEdits(canvas, nodes);
 }
 
@@ -1020,7 +1515,7 @@ export function addHostPlanStep(
   const step: JsonObject = {
     ...template,
     step_id: stepId,
-    objective: locale === 'zh' ? '新增宿主步骤' : 'New host plan step',
+    objective: locale === 'zh' ? '新步骤' : 'New step',
     depends_on: existing.length
       ? [String(existing[existing.length - 1].step_id)]
       : [],
