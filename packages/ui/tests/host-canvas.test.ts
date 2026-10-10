@@ -7,6 +7,7 @@ import {
   isHostRunEditable,
   planEditBodyFromCanvas,
   readHostEditRevision,
+  recoveryFailureFromDto,
   refuseUninjectedPlayground,
 } from '../src/integrations/host-canvas';
 
@@ -229,6 +230,58 @@ describe('host canvas inject helpers', () => {
         addStep: false,
       });
     }
+  });
+
+  it('recoveryFailureFromDto parses a valid GET /failure body', () => {
+    const failure = recoveryFailureFromDto({
+      schema_version: 'host.flow-recovery-request.v1',
+      run_id: 'run-1',
+      hook_id: 'recovery:step-001.0',
+      token: 'tok-recovery',
+      metadata: {
+        step_id: 'step-001',
+        step_name: 'orchestrator.agent_step',
+        attempt: 0,
+        error: 'boom',
+        original_step: {
+          step_id: 'step-001',
+          agent_id: 'a',
+          version: '1.0.0',
+        },
+        proposal_digest: 'sha256:abc',
+        completed_step_outputs: [{ ok: true }],
+      },
+    });
+    expect(failure).toEqual({
+      schema_version: 'host.flow-recovery-request.v1',
+      run_id: 'run-1',
+      hook_id: 'recovery:step-001.0',
+      token: 'tok-recovery',
+      metadata: {
+        step_id: 'step-001',
+        step_name: 'orchestrator.agent_step',
+        attempt: 0,
+        error: 'boom',
+        original_step: {
+          step_id: 'step-001',
+          agent_id: 'a',
+          version: '1.0.0',
+        },
+        proposal_digest: 'sha256:abc',
+        completed_step_outputs: [{ ok: true }],
+      },
+    });
+  });
+
+  it('recoveryFailureFromDto passes through null (no open recovery hook)', () => {
+    expect(recoveryFailureFromDto(null)).toBeNull();
+  });
+
+  it('recoveryFailureFromDto fails closed on a malformed body', () => {
+    expect(() => recoveryFailureFromDto({})).toThrow(HostCanvasError);
+    expect(() => recoveryFailureFromDto({ metadata: 'nope' })).toThrow(
+      HostCanvasError,
+    );
   });
 
   it('keeps edit_revision monotonic across reload', () => {

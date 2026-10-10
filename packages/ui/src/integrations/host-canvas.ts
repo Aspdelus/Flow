@@ -96,6 +96,75 @@ export function hostRunEditActions(canvas: HostCanvasDocument): HostRunEditActio
   return { save: editable, approve: editable, addStep: editable };
 }
 
+export const RECOVERY_FAILURE_SCHEMA = 'host.flow-recovery-request.v1';
+
+/**
+ * `GET /v1/runs/{id}/failure` DTO -- present only while the run has an
+ * *open* recovery hook (one agent-execution step permanently failed and the
+ * run suspended behind that hook instead of failing outright). A run can be
+ * `flow_status: "suspended"` for unrelated reasons (an approval hook still
+ * waiting, a timer), so this type's presence/absence -- not `flow_status`
+ * -- is the only correct signal for whether the recovery dialog applies.
+ * See `resolveHostRecoveryFailure`'s doc comment for why this must stay a
+ * signal fully independent of `hostRunEditActions`/`isHostRunEditable`.
+ */
+export type HostRecoveryFailure = {
+  schema_version: typeof RECOVERY_FAILURE_SCHEMA;
+  run_id: string;
+  hook_id: string;
+  token: string;
+  metadata: {
+    step_id: unknown;
+    step_name: unknown;
+    attempt: unknown;
+    error: unknown;
+    original_step: JsonObject;
+    proposal_digest: unknown;
+    completed_step_outputs: unknown[];
+  };
+};
+
+/**
+ * Parse `GET /v1/runs/{id}/failure`'s 200 body, or `null` for its 404 ("no
+ * open recovery hook right now") -- both are ordinary outcomes, never an
+ * error to surface. Deliberately NOT folded into `hostRunEditActions`: a
+ * prior bug in this codebase coupled Save/Approve visibility to a "Failed"
+ * status pill through one shared field, so a terminal run silently hid both
+ * buttons together and looked like a UI glitch. The recovery dialog's
+ * visibility must stay driven by this function's result alone, never by
+ * `flow_status`.
+ */
+export function recoveryFailureFromDto(
+  dto: unknown,
+): HostRecoveryFailure | null {
+  if (dto === null) return null;
+  if (!isObject(dto)) {
+    throw new HostCanvasError('INVALID_INPUT: recovery DTO must be an object');
+  }
+  const metadata = dto.metadata;
+  if (!isObject(metadata)) {
+    throw new HostCanvasError('INVALID_INPUT: recovery DTO has no metadata');
+  }
+  const originalStep = metadata.original_step;
+  return {
+    schema_version: RECOVERY_FAILURE_SCHEMA,
+    run_id: typeof dto.run_id === 'string' ? dto.run_id : '',
+    hook_id: typeof dto.hook_id === 'string' ? dto.hook_id : '',
+    token: typeof dto.token === 'string' ? dto.token : '',
+    metadata: {
+      step_id: metadata.step_id,
+      step_name: metadata.step_name,
+      attempt: metadata.attempt,
+      error: metadata.error,
+      original_step: isObject(originalStep) ? originalStep : {},
+      proposal_digest: metadata.proposal_digest,
+      completed_step_outputs: Array.isArray(metadata.completed_step_outputs)
+        ? metadata.completed_step_outputs
+        : [],
+    },
+  };
+}
+
 export interface HostEditRevisionStore {
   getItem(key: string): string | null;
   setItem(key: string, value: string): void;
