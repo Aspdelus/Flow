@@ -9,21 +9,37 @@ import {
 } from '@a3s-lab/flow-ui';
 import {
   applyCopilotSteps,
+  beginNewRun,
   createHostInjectedExample,
   createHostModeCatalog,
   createHostRunPickerExample,
   graphFromHostCanvas,
   hostCanvasFromGraph,
+  hostRunExecutionFromSnapshot,
+  isHostRunExecutionActive,
   isProposalNotYetReady,
+  isProposalRefused,
+  isRunNotYetCreated,
   listHostRuns,
+  loadHostPlanRefusal,
+  loadHostRunTaskText,
+  loadHostRecoveryFailure,
+  loadHostRunExecution,
   mintApprovalToken,
   mintRunId,
+  pendingRunStart,
   readHostModeConfig,
+  subscribeToHostProgress,
   submitNewRun,
+  submitRecoveryEdit,
   withHostModeParams,
 } from './WorkflowPlayground.host';
 import { createPlaygroundNodeCatalog } from './WorkflowPlayground.custom-nodes';
 import { createPlaygroundEdge } from './WorkflowPlayground.model';
+import {
+  executionLabel,
+  planningLabel,
+} from './WorkflowPlaygroundChrome';
 
 const HOST_PREVIEW_TYPE = 'host.preview.step';
 
@@ -734,4 +750,635 @@ describe('WorkflowPlayground host mode', () => {
 
     expect(isProposalNotYetReady(new Error('unrelated'))).toBe(false);
   });
+
+  it('loadHostRecoveryFailure returns the parsed failure when the hook is open', async () => {
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
+      expect(String(input)).toBe('http://127.0.0.1:9/v1/runs/run-1/failure');
+      return new Response(
+        JSON.stringify({
+          schema_version: 'host.flow-recovery-request.v1',
+          run_id: 'run-1',
+          hook_id: 'recovery:step-001.0',
+          token: 'tok-recovery',
+          metadata: {
+            step_id: 'step-001',
+            step_name: 'orchestrator.agent_step',
+            attempt: 0,
+            error: 'boom',
+            original_step: {
+              step_id: 'step-001',
+              agent_id: 'a',
+              version: '1.0.0',
+            },
+            proposal_digest: 'sha256:abc',
+            completed_step_outputs: [],
+          },
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      );
+    });
+    vi.stubGlobal('fetch', fetchImpl);
+    try {
+      const failure = await loadHostRecoveryFailure({
+        baseUrl: 'http://127.0.0.1:9',
+        runId: 'run-1',
+        tenantId: 'tenant-local-validation',
+        principalRef: 'reviewer@local',
+      });
+      expect(failure?.hook_id).toBe('recovery:step-001.0');
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('loadHostRecoveryFailure returns null on a 404 (no open recovery hook)', async () => {
+    const fetchImpl = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({ error: 'NOT_FOUND: run has no open recovery hook' }),
+          { status: 404, headers: { 'Content-Type': 'application/json' } },
+        ),
+    );
+    vi.stubGlobal('fetch', fetchImpl);
+    try {
+      const failure = await loadHostRecoveryFailure({
+        baseUrl: 'http://127.0.0.1:9',
+        runId: 'run-1',
+        tenantId: 'tenant-local-validation',
+        principalRef: 'reviewer@local',
+      });
+      expect(failure).toBeNull();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('submitRecoveryEdit POSTs only the edited fields', async () => {
+    const fetchImpl = vi.fn(
+      async (input: RequestInfo | URL, init?: RequestInit) => {
+        expect(String(input)).toBe(
+          'http://127.0.0.1:9/v1/runs/run-1/resume-after-failure',
+        );
+        const body = JSON.parse(String(init?.body ?? '{}'));
+        expect(body).toEqual({ objective: 'retry with a different angle' });
+        return new Response(
+          JSON.stringify({
+            schema_version: 'host.flow-recovery-resume.v1',
+            hook_id: 'recovery:step-001.0',
+            snapshot: { status: 'Running' },
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } },
+        );
+      },
+    );
+    vi.stubGlobal('fetch', fetchImpl);
+    try {
+      await submitRecoveryEdit(
+        {
+          baseUrl: 'http://127.0.0.1:9',
+          runId: 'run-1',
+          tenantId: 'tenant-local-validation',
+          principalRef: 'reviewer@local',
+        },
+        { objective: 'retry with a different angle' },
+      );
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('submitRecoveryEdit requires both agent_id and version together', async () => {
+    const fetchImpl = vi.fn(
+      async (_input: RequestInfo | URL, init?: RequestInit) => {
+        const body = JSON.parse(String(init?.body ?? '{}'));
+        expect(body).toEqual({
+          agent_id: 'backend-developer',
+          version: '2.0.0',
+        });
+        return new Response(
+          JSON.stringify({
+            schema_version: 'host.flow-recovery-resume.v1',
+            hook_id: 'recovery:step-001.0',
+            snapshot: { status: 'Running' },
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } },
+        );
+      },
+    );
+    vi.stubGlobal('fetch', fetchImpl);
+    try {
+      await submitRecoveryEdit(
+        {
+          baseUrl: 'http://127.0.0.1:9',
+          runId: 'run-1',
+          tenantId: 'tenant-local-validation',
+          principalRef: 'reviewer@local',
+        },
+        { agentId: 'backend-developer', version: '2.0.0' },
+      );
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('submitRecoveryEdit throws on a rejected edit, leaving the hook resumable', async () => {
+    const fetchImpl = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({
+            error:
+              'REJECTED: UNKNOWN_AGENT_REF: agent ghost@9.9.9 is not in the plan',
+          }),
+          { status: 400, headers: { 'Content-Type': 'application/json' } },
+        ),
+    );
+    vi.stubGlobal('fetch', fetchImpl);
+    try {
+      await expect(
+        submitRecoveryEdit(
+          {
+            baseUrl: 'http://127.0.0.1:9',
+            runId: 'run-1',
+            tenantId: 'tenant-local-validation',
+            principalRef: 'reviewer@local',
+          },
+          { agentId: 'ghost', version: '9.9.9' },
+        ),
+      ).rejects.toThrow(/REJECTED/);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('subscribeToHostProgress calls onEvent for each frame and requests follow=true', async () => {
+    const frame1 = {
+      schema_version: 'host.compose-progress.v1',
+      flow_run_id: 'run-1',
+      observed_at_utc: '2026-09-16T04:00:00+00:00',
+      step_index: 1,
+      total: 2,
+      agent_id: 'frontend-developer',
+      status: 'draft',
+      progress_token: 'orchestrator.compose_plan|i=1|n=2|a=frontend-developer',
+      progress: 1.0,
+    };
+    const frame2 = { ...frame1, step_index: 2, agent_id: 'react-specialist' };
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
+      expect(String(input)).toBe(
+        'http://127.0.0.1:9/v1/runs/run-1/progress?follow=true',
+      );
+      return new Response(
+        new ReadableStream({
+          start(controller) {
+            controller.enqueue(
+              new TextEncoder().encode(`${JSON.stringify(frame1)}\n`),
+            );
+            controller.enqueue(
+              new TextEncoder().encode(`${JSON.stringify(frame2)}\n`),
+            );
+            controller.close();
+          },
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/x-ndjson' } },
+      );
+    });
+    vi.stubGlobal('fetch', fetchImpl);
+    try {
+      const received: unknown[] = [];
+      await subscribeToHostProgress(
+        {
+          baseUrl: 'http://127.0.0.1:9',
+          runId: 'run-1',
+          tenantId: 'tenant-local-validation',
+          principalRef: 'reviewer@local',
+        },
+        'run-1',
+        (frame) => received.push(frame),
+      );
+      expect(received).toEqual([frame1, frame2]);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('subscribeToHostProgress resolves quietly on a 404 (host has no progress yet)', async () => {
+    const fetchImpl = vi.fn(
+      async () => new Response('not found', { status: 404 }),
+    );
+    vi.stubGlobal('fetch', fetchImpl);
+    try {
+      const received: unknown[] = [];
+      await expect(
+        subscribeToHostProgress(
+          {
+            baseUrl: 'http://127.0.0.1:9',
+            runId: 'run-1',
+            tenantId: 'tenant-local-validation',
+            principalRef: 'reviewer@local',
+          },
+          'run-1',
+          (frame) => received.push(frame),
+        ),
+      ).resolves.toBeUndefined();
+      expect(received).toEqual([]);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("subscribeToHostProgress swallows a synchronous getProgressStream failure (its own catch, not getProgressStream's)", async () => {
+    // An empty runId makes the underlying FlowHostClient.getProgressStream
+    // throw HostClientError synchronously on first iteration -- this is a
+    // failure surfacing *through* subscribeToHostProgress's own try/catch,
+    // distinct from getProgressStream's internal fail-soft `return` on a
+    // network error, which never throws.
+    const fetchImpl = vi.fn();
+    vi.stubGlobal('fetch', fetchImpl);
+    try {
+      const received: unknown[] = [];
+      await expect(
+        subscribeToHostProgress(
+          {
+            baseUrl: 'http://127.0.0.1:9',
+            runId: 'run-1',
+            tenantId: 'tenant-local-validation',
+            principalRef: 'reviewer@local',
+          },
+          '   ',
+          (frame) => received.push(frame),
+        ),
+      ).resolves.toBeUndefined();
+      expect(received).toEqual([]);
+      expect(fetchImpl).not.toHaveBeenCalled();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('subscribeToHostProgress stops emitting once its signal is aborted', async () => {
+    const frame = {
+      schema_version: 'host.compose-progress.v1',
+      flow_run_id: 'run-1',
+      observed_at_utc: '2026-09-16T04:00:00+00:00',
+      step_index: 1,
+      total: 1,
+      agent_id: 'frontend-developer',
+      status: 'draft',
+      progress_token: 'orchestrator.compose_plan|i=1|n=1|a=frontend-developer',
+      progress: 1.0,
+    };
+    const fetchImpl = vi.fn(
+      async (_input: RequestInfo | URL, init?: RequestInit) => {
+        const signal = init?.signal;
+        const body = new ReadableStream({
+          start(controller) {
+            controller.enqueue(
+              new TextEncoder().encode(`${JSON.stringify(frame)}\n`),
+            );
+            const onAbort = () =>
+              controller.error(new DOMException('Aborted', 'AbortError'));
+            if (signal?.aborted) {
+              onAbort();
+            } else {
+              signal?.addEventListener('abort', onAbort);
+            }
+          },
+        });
+        return new Response(body, { status: 200 });
+      },
+    );
+    vi.stubGlobal('fetch', fetchImpl);
+    try {
+      const controller = new AbortController();
+      const received: unknown[] = [];
+      const done = subscribeToHostProgress(
+        {
+          baseUrl: 'http://127.0.0.1:9',
+          runId: 'run-1',
+          tenantId: 'tenant-local-validation',
+          principalRef: 'reviewer@local',
+        },
+        'run-1',
+        (f) => {
+          received.push(f);
+          controller.abort();
+        },
+        { signal: controller.signal },
+      );
+      await expect(done).resolves.toBeUndefined();
+      expect(received).toEqual([frame]);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+  it('hostRunExecutionFromSnapshot maps agent:<step_id> Flow steps onto canvas node ids', () => {
+    const execution = hostRunExecutionFromSnapshot({
+      status: 'running',
+      steps: {
+        'orchestrator.plan': { status: 'completed' },
+        'orchestrator.plan.r1': { status: 'completed' },
+        'agent:research-china': { status: 'completed' },
+        'agent:research-japan': { status: 'running' },
+        'agent:research-us': { status: 'running' },
+        'agent:research-korea': { status: 'pending' },
+      },
+    });
+    expect(execution.status).toBe('running');
+    expect(execution.nodeStatuses).toEqual({
+      start: 'success',
+      'research-china': 'success',
+      'research-japan': 'running',
+      'research-us': 'running',
+      'research-korea': 'waiting',
+    });
+    expect(execution.runningStepIds).toEqual(['research-japan', 'research-us']);
+    expect(execution.completedStepCount).toBe(1);
+    expect(execution.failedStepCount).toBe(0);
+    // orchestrator.plan* never becomes a node status.
+    expect(Object.keys(execution.nodeStatuses)).not.toContain('orchestrator.plan');
+  });
+
+  it('hostRunExecutionFromSnapshot lets the latest recovery retry override a failed attempt', () => {
+    const execution = hostRunExecutionFromSnapshot({
+      status: 'running',
+      steps: {
+        'agent:step-a': { status: 'failed' },
+        'agent:step-a.retry2': { status: 'running' },
+        'agent:step-a.retry1': { status: 'failed' },
+      },
+    });
+    expect(execution.nodeStatuses['step-a']).toBe('running');
+    expect(execution.failedStepCount).toBe(0);
+    expect(execution.runningStepIds).toEqual(['step-a']);
+  });
+
+  it('hostRunExecutionFromSnapshot marks the sink from the terminal run status', () => {
+    expect(
+      hostRunExecutionFromSnapshot({
+        status: 'Completed',
+        steps: { 'agent:a': { status: 'completed' } },
+      }).nodeStatuses.done,
+    ).toBe('success');
+    const failed = hostRunExecutionFromSnapshot({
+      status: 'failed',
+      steps: { 'agent:a': { status: 'failed' } },
+    });
+    expect(failed.nodeStatuses.done).toBe('error');
+    expect(failed.nodeStatuses.a).toBe('error');
+    expect(failed.failedStepCount).toBe(1);
+    // Before any agent step is scheduled (still planning / awaiting approval)
+    // nothing on the canvas is painted.
+    expect(
+      hostRunExecutionFromSnapshot({
+        status: 'suspended',
+        steps: { 'orchestrator.plan': { status: 'completed' } },
+      }).nodeStatuses,
+    ).toEqual({});
+    expect(hostRunExecutionFromSnapshot(null)).toEqual({
+      status: '',
+      nodeStatuses: {},
+      runningStepIds: [],
+      completedStepCount: 0,
+      failedStepCount: 0,
+    });
+  });
+
+  it('isHostRunExecutionActive keeps polling only while the run moves on its own', () => {
+    expect(isHostRunExecutionActive('running')).toBe(true);
+    expect(isHostRunExecutionActive('Pending')).toBe(true);
+    expect(isHostRunExecutionActive('cancelling')).toBe(true);
+    // A suspended run waits on a human (approval / recovery hook).
+    expect(isHostRunExecutionActive('suspended')).toBe(false);
+    expect(isHostRunExecutionActive('completed')).toBe(false);
+    expect(isHostRunExecutionActive('failed')).toBe(false);
+  });
+
+  it('loadHostRunExecution reads GET /v1/runs/{id} for the configured run', async () => {
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
+      expect(String(input)).toBe('http://127.0.0.1:9/v1/runs/run-1');
+      return new Response(
+        JSON.stringify({
+          status: 'running',
+          steps: { 'agent:s1': { status: 'running' } },
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      );
+    });
+    vi.stubGlobal('fetch', fetchImpl);
+    try {
+      const execution = await loadHostRunExecution({
+        baseUrl: 'http://127.0.0.1:9',
+        runId: 'run-1',
+        tenantId: 'tenant-local-validation',
+        principalRef: 'reviewer@local',
+      });
+      expect(execution.runningStepIds).toEqual(['s1']);
+      expect(fetchImpl).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('executionLabel names the running steps and completed/total', () => {
+    expect(
+      executionLabel(
+        { runningStepIds: ['research-japan'], completed: 1, total: 6 },
+        'zh',
+      ),
+    ).toBe('执行中 1/6 · research-japan');
+    expect(
+      executionLabel({ runningStepIds: [], completed: 0, total: null }, 'en'),
+    ).toBe('Executing 0/?');
+  });
+  it('beginNewRun returns the run id before the host answers, and tracks the start until then', async () => {
+    let answer: (response: Response) => void = () => {};
+    const fetchImpl = vi.fn(
+      () => new Promise<Response>((resolve) => (answer = resolve)),
+    );
+    vi.stubGlobal('fetch', fetchImpl);
+    try {
+      const { runId, started } = beginNewRun(
+        {
+          baseUrl: 'http://127.0.0.1:9',
+          runId: '',
+          tenantId: 'tenant-local-validation',
+          principalRef: 'reviewer@local',
+        },
+        'a task',
+        ['read'],
+      );
+      expect(runId).toMatch(/^run-\d+-/);
+      expect(fetchImpl).toHaveBeenCalledTimes(1);
+      // Still planning on the host: a 404 for this run means "not created yet".
+      expect(pendingRunStart(runId)).toBe(started);
+      const notFound = new HostClientError('INVALID_INPUT: host returned HTTP 404', 404, {});
+      expect(isRunNotYetCreated(notFound, runId)).toBe(true);
+      expect(isRunNotYetCreated(notFound, 'some-other-run')).toBe(false);
+      answer(
+        new Response(JSON.stringify({ run_id: runId, status: 'suspended' }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        }),
+      );
+      await started;
+      await Promise.resolve();
+      expect(pendingRunStart(runId)).toBeUndefined();
+      expect(isRunNotYetCreated(notFound, runId)).toBe(false);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('beginNewRun keeps a failed start visible with the host error text', async () => {
+    const fetchImpl = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({ error: 'runtime error: INVALID_INPUT: bad constraint' }),
+          { status: 400, headers: { 'Content-Type': 'application/json' } },
+        ),
+    );
+    vi.stubGlobal('fetch', fetchImpl);
+    try {
+      const { runId, started } = beginNewRun(
+        {
+          baseUrl: 'http://127.0.0.1:9',
+          runId: '',
+          tenantId: 'tenant-local-validation',
+          principalRef: 'reviewer@local',
+        },
+        'a task',
+        ['read'],
+      );
+      await expect(started).rejects.toThrow(/bad constraint/);
+      await expect(pendingRunStart(runId)).rejects.toThrow(/bad constraint/);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('beginNewRun rejects blank task text synchronously, before any request', () => {
+    const fetchImpl = vi.fn();
+    vi.stubGlobal('fetch', fetchImpl);
+    try {
+      expect(() =>
+        beginNewRun(
+          {
+            baseUrl: 'http://127.0.0.1:9',
+            runId: '',
+            tenantId: 'tenant-local-validation',
+            principalRef: 'reviewer@local',
+          },
+          '  ',
+          ['read'],
+        ),
+      ).toThrow(/task text is required/);
+      expect(fetchImpl).not.toHaveBeenCalled();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('isProposalRefused matches only the refused-plan 400, not still-planning', () => {
+    expect(
+      isProposalRefused(
+        new HostClientError('INVALID_INPUT: host returned HTTP 400', 400, {
+          error: 'runtime error: INVALID_INPUT: plan output has no proposal',
+        }),
+      ),
+    ).toBe(true);
+    expect(
+      isProposalRefused(
+        new HostClientError('INVALID_INPUT: host returned HTTP 400', 400, {
+          error: 'runtime error: INVALID_INPUT: run has no verified proposal',
+        }),
+      ),
+    ).toBe(false);
+    expect(isProposalRefused(new Error('plan output has no proposal'))).toBe(false);
+  });
+
+  it('loadHostPlanRefusal reads the refusal reason codes off the run snapshot', async () => {
+    const fetchImpl = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({
+            status: 'completed',
+            output: {
+              refusal: {
+                refusal: true,
+                reason_codes: ['PLANNER_OUTPUT_INVALID'],
+              },
+            },
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } },
+        ),
+    );
+    vi.stubGlobal('fetch', fetchImpl);
+    try {
+      const config = {
+        baseUrl: 'http://127.0.0.1:9',
+        runId: 'run-1',
+        tenantId: 'tenant-local-validation',
+        principalRef: 'reviewer@local',
+      };
+      expect(await loadHostPlanRefusal(config)).toEqual(['PLANNER_OUTPUT_INVALID']);
+      fetchImpl.mockImplementationOnce(
+        async () =>
+          new Response(JSON.stringify({ status: 'completed', output: {} }), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          }),
+      );
+      expect(await loadHostPlanRefusal(config)).toBeNull();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('planningLabel names the current planning phase with elapsed time', () => {
+    expect(planningLabel({ elapsedSecs: 5 }, 'zh')).toBe('规划中 5s');
+    expect(
+      planningLabel({ elapsedSecs: 12, phase: 'model', modelCalls: 3 }, 'zh'),
+    ).toBe('规划中 12s · 模型思考中（第 3 次调用）');
+    expect(
+      planningLabel({ elapsedSecs: 18, phase: 'tool', tool: 'shortlist' }, 'en'),
+    ).toBe('Planning 18s · shortlisting agents');
+    expect(
+      planningLabel({ elapsedSecs: 18, phase: 'tool', tool: 'new_tool' }, 'en'),
+    ).toBe('Planning 18s · new_tool');
+  });
+  it('loadHostRunTaskText reads the task the run was started with', async () => {
+    const fetchImpl = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({
+            status: 'running',
+            input: { task_text: '  帮我写一份中美日韩四国AI发展对比报告 ' },
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } },
+        ),
+    );
+    vi.stubGlobal('fetch', fetchImpl);
+    try {
+      const config = {
+        baseUrl: 'http://127.0.0.1:9',
+        runId: 'run-1',
+        tenantId: 'tenant-local-validation',
+        principalRef: 'reviewer@local',
+      };
+      expect(await loadHostRunTaskText(config)).toBe(
+        '帮我写一份中美日韩四国AI发展对比报告',
+      );
+      fetchImpl.mockImplementationOnce(
+        async () =>
+          new Response(JSON.stringify({ status: 'running', input: {} }), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          }),
+      );
+      expect(await loadHostRunTaskText(config)).toBeNull();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
 });

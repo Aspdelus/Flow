@@ -9,6 +9,8 @@ import {
   type A3SFlowCustomDagNodeRegistration,
   type A3SFlowWorkflowDagNode,
   type HostCanvasDocument,
+  type HostComposeProgressFrame,
+  type HostRecoveryFailure,
   type JsonObject,
 } from '@a3s-lab/flow-ui';
 import { useLang, useSite, useVersion, withBase } from '@rspress/core/runtime';
@@ -75,16 +77,27 @@ import {
 import {
   addHostPlanStep,
   applyCopilotSteps,
+  beginNewRun,
   createHostClient,
   graphFromHostCanvas,
   hostCanvasFromGraph,
+  isHostRunExecutionActive,
   isProposalNotYetReady,
+  isProposalRefused,
+  isRunNotYetCreated,
   listHostRuns,
   loadHostCanvas,
+  loadHostPlanRefusal,
+  loadHostRecoveryFailure,
+  loadHostRunExecution,
+  loadHostRunTaskText,
+  pendingRunStart,
   postCopilotRequest,
   refreshCanvasFromProposalDto,
-  submitNewRun,
+  subscribeToHostProgress,
+  submitRecoveryEdit,
   withHostModeParams,
+  type HostRunExecution,
   type HostRunSummary,
 } from './WorkflowPlayground.host';
 import {
@@ -117,6 +130,8 @@ import {
 } from './WorkflowPlayground.model';
 import { WorkflowPlaygroundNode } from './WorkflowPlaygroundNode';
 import { WorkflowPlaygroundRegistryContext } from './WorkflowPlayground.registry';
+import { WorkflowPlaygroundRecoveryDialog } from './WorkflowPlaygroundRecoveryDialog';
+import type { WorkflowPlaygroundRecoveryEdit } from './WorkflowPlaygroundRecoveryDialog';
 import { WorkflowPlaygroundTriggerDialog } from './WorkflowPlaygroundTriggerDialog';
 import {
   isTriggerSchema,
@@ -177,6 +192,55 @@ function WorkflowPlaygroundSurface({
     });
   const [hostCanvas, setHostCanvas] = useState<HostCanvasDocument | null>(null);
   const [hostBusy, setHostBusy] = useState(false);
+  // Independent of hostCanvas.flow_status on purpose -- a run can be
+  // "suspended" for unrelated reasons (an approval hook, a timer), so
+  // whether the recovery dialog applies is only ever known by asking
+  // GET /v1/runs/{id}/failure (see WorkflowPlaygroundRecoveryDialog's doc
+  // comment and recoveryFailureFromDto's). Never fold this into
+  // hostRunEditActions -- that repeated a real bug once already (Save/
+  // Approve visibility and a status pill coupled through one shared field).
+  const [hostRecoveryFailure, setHostRecoveryFailure] =
+    useState<HostRecoveryFailure | null>(null);
+  const [recoveryDialogOpen, setRecoveryDialogOpen] = useState(false);
+  const [recoveryBusy, setRecoveryBusy] = useState(false);
+  const [recoveryError, setRecoveryError] = useState<string | null>(null);
+  // Fail-soft overlay only, never a gate on anything -- see
+  // subscribeToHostProgress's doc comment. Cleared once hostCanvas arrives
+  // (the proposal supersedes any in-flight draft preview) or when there is
+  // no run to subscribe for.
+  const [hostProgress, setHostProgress] =
+    useState<HostComposeProgressFrame | null>(null);
+  // True while this run has no proposal yet because orchestrator.plan is
+  // still running (or the host has not recorded the run yet). Drives the
+  // "planning" header status; the progress subscription below refines it.
+  const [hostPlanning, setHostPlanning] = useState(false);
+  // What the user asked for (the run's task_text) -- the page title in host
+  // mode, instead of a generic "AI plan" label.
+  const [hostTaskText, setHostTaskText] = useState<string | null>(null);
+  // Latest planning *phase* frame (kind: "phase"); drafts stay in
+  // hostProgress so a later phase frame never hides the last draft.
+  const [hostPlanningPhase, setHostPlanningPhase] =
+    useState<HostComposeProgressFrame | null>(null);
+  // Ticks once a second while planning so the header can show elapsed time
+  // even between progress frames (a single model call can take a minute).
+  const [planningNow, setPlanningNow] = useState(() => Date.now());
+  const planningStartedAtRef = useRef<number | null>(null);
+  // Post-approval execution state, polled from GET /v1/runs/{id} (see the
+  // execution-poll effect below). Display-only: Save/Approve gating still
+  // reads hostCanvas.flow_status, which only changes on an explicit refetch.
+  const [hostExecution, setHostExecution] = useState<HostRunExecution | null>(
+    null,
+  );
+  // Bumped to (re)start the execution poll, e.g. right as Approve is sent.
+  const [hostExecutionWatch, setHostExecutionWatch] = useState(0);
+  // True while POST /v1/hooks/{token}/resume is outstanding. The host drives
+  // the run inside that request, so it can stay open for minutes; the poll
+  // keeps going for as long as it does, whatever the snapshot says.
+  const approveInFlightRef = useRef(false);
+  // Refetch proposal + recovery check once a run the poll saw executing
+  // stops on its own (no Approve request of ours to do the refetch).
+  // Assigned every render so the poll effect never holds a stale closure.
+  const refreshHostCanvasAfterExecutionRef = useRef<() => void>(() => {});
   // Persist across Playground reloads so host "must increase" stays satisfied.
   const [editRevision, setEditRevision] = useState(() => {
     if (!hostMode?.runId || typeof sessionStorage === 'undefined') return 1;
@@ -249,19 +313,37 @@ function WorkflowPlaygroundSurface({
     let cancelled = false;
     setHostBusy(true);
     setHostLoadError(null);
-    // A run just created via submitNewRun can still be mid-plan-step (a real
-    // model call) when this effect first fires -- isProposalNotYetReady
-    // distinguishes that from a genuine load failure and polls instead of
-    // surfacing a scary error for "still planning." Every other entry point
-    // (run picker, a bookmarked ?runId=) only ever links to an already
-    // planned run, so this loop resolves on its first attempt there.
+    // A run just created via beginNewRun is usually still mid-plan-step (a
+    // real model call) when this effect first fires -- and until the host has
+    // recorded it, may not even exist yet (404). isProposalNotYetReady /
+    // isRunNotYetCreated distinguish those from a genuine load failure and
+    // poll instead of surfacing a scary error for "still planning." Every
+    // other entry point (run picker, a bookmarked ?runId=) only ever links to
+    // an already started run, so this loop resolves on its first attempt, or
+    // keeps polling if that run is itself still planning.
     const POLL_INTERVAL_MS = 3000;
-    const POLL_TIMEOUT_MS = 180_000;
+    // Must outlast the host's own orchestrator dispatch timeout
+    // (run_timeout_secs, 600 s on the resident stack) -- a real planning run
+    // routinely takes minutes.
+    const POLL_TIMEOUT_MS = 660_000;
     const deadline = Date.now() + POLL_TIMEOUT_MS;
+    const runId = hostMode.runId;
+    // Surface a failed start (e.g. malformed constraints) the moment the
+    // host answers, instead of polling a run that will never exist.
+    void pendingRunStart(runId)?.catch((error: unknown) => {
+      if (cancelled) return;
+      cancelled = true;
+      setHostPlanning(false);
+      const message = error instanceof Error ? error.message : String(error);
+      setHostLoadError(message);
+      setAnnouncement(message);
+      setHostBusy(false);
+    });
     const attempt = (): void => {
       void loadHostCanvas(hostMode)
         .then((canvas) => {
           if (cancelled) return;
+          setHostPlanning(false);
           setHostCanvas(canvas);
           lastSavedPlanStepsRef.current = JSON.stringify(canvas.plan.steps);
           restore(graphFromHostCanvas(canvas, locale, catalog));
@@ -280,16 +362,48 @@ function WorkflowPlaygroundSurface({
               : `Injected ${canvas.proposal_digest}`,
           );
           setHostBusy(false);
+          // The proposal supersedes any in-flight draft preview -- clear it
+          // immediately rather than waiting for the progress effect below to
+          // re-run and tear its subscription down asynchronously.
+          setHostProgress(null);
+          // Independent check, tolerant of failure -- a host that doesn't
+          // support this endpoint yet, or a transient error, must not break
+          // the main canvas load. See hostRecoveryFailure's doc comment.
+          void loadHostRecoveryFailure(hostMode)
+            .then((failure) => {
+              if (!cancelled) setHostRecoveryFailure(failure);
+            })
+            .catch(() => {
+              if (!cancelled) setHostRecoveryFailure(null);
+            });
         })
         .catch((error: unknown) => {
           if (cancelled) return;
-          if (isProposalNotYetReady(error) && Date.now() < deadline) {
-            setAnnouncement(
-              locale === 'zh'
-                ? '正在规划中，请稍候…'
-                : 'Planning in progress, please wait…',
-            );
+          if (
+            (isProposalNotYetReady(error) ||
+              isRunNotYetCreated(error, runId)) &&
+            Date.now() < deadline
+          ) {
+            setHostPlanning(true);
             window.setTimeout(attempt, POLL_INTERVAL_MS);
+            return;
+          }
+          setHostPlanning(false);
+          if (isProposalRefused(error)) {
+            // The plan step finished but refused: show why, not a bare 400.
+            void loadHostPlanRefusal(hostMode)
+              .catch(() => null)
+              .then((codes) => {
+                if (cancelled) return;
+                const reasons = codes && codes.length ? codes.join(', ') : '';
+                const message =
+                  locale === 'zh'
+                    ? `编排器拒绝生成方案${reasons ? `：${reasons}` : ''}`
+                    : `The orchestrator refused to plan${reasons ? `: ${reasons}` : ''}`;
+                setHostLoadError(message);
+                setAnnouncement(message);
+                setHostBusy(false);
+              });
             return;
           }
           const message =
@@ -304,6 +418,124 @@ function WorkflowPlaygroundSurface({
       cancelled = true;
     };
   }, [catalog, hostMode, locale, restore]);
+
+  // Compose-plan draft preview (W18-2b): only while orchestrator.plan is
+  // still in flight (no proposal yet) -- once hostCanvas arrives the effect
+  // above clears hostProgress and this effect's dependency change tears the
+  // subscription down anyway. Unlike every other host-mode effect in this
+  // file, a `cancelled` flag alone cannot stop this: `follow=true` keeps the
+  // underlying fetch open indefinitely, so cancellation must actually abort
+  // the request via AbortController. Fail-soft throughout -- see
+  // subscribeToHostProgress's doc comment; a host without this endpoint (or
+  // a flaky one) must never block opening/saving/approving/recovering a run.
+  useEffect(() => {
+    if (!hostMode?.runId || hostCanvas) {
+      setHostProgress(null);
+      setHostPlanningPhase(null);
+      return;
+    }
+    const controller = new AbortController();
+    const onFrame = (frame: HostComposeProgressFrame): void => {
+      if (frame.kind === 'phase') setHostPlanningPhase(frame);
+      else setHostProgress(frame);
+    };
+    // Resubscribe whenever the stream ends before the proposal arrives: a
+    // run the host has not recorded yet, a dropped connection, or a host
+    // restart all end it early. The host replays its buffer on every
+    // subscribe, so a re-read frame just overwrites the same state.
+    const RESUBSCRIBE_MS = 2000;
+    void (async () => {
+      while (!controller.signal.aborted) {
+        await subscribeToHostProgress(hostMode, hostMode.runId, onFrame, {
+          signal: controller.signal,
+        });
+        if (controller.signal.aborted) return;
+        await new Promise((resolve) => window.setTimeout(resolve, RESUBSCRIBE_MS));
+      }
+    })();
+    return () => controller.abort();
+  }, [hostMode, hostCanvas]);
+
+  // Load the task text once per run. A run started from this page may not
+  // exist on the host for a moment, so retry briefly; fail-soft (the generic
+  // title stays) on anything else.
+  useEffect(() => {
+    setHostTaskText(null);
+    if (!hostMode?.runId) return;
+    let cancelled = false;
+    let timer: number | undefined;
+    let tries = 0;
+    const attempt = (): void => {
+      void loadHostRunTaskText(hostMode)
+        .then((text) => {
+          if (!cancelled) setHostTaskText(text);
+        })
+        .catch(() => {
+          if (cancelled || ++tries >= 10) return;
+          timer = window.setTimeout(attempt, 1500);
+        });
+    };
+    attempt();
+    return () => {
+      cancelled = true;
+      if (timer !== undefined) window.clearTimeout(timer);
+    };
+  }, [hostMode]);
+
+  useEffect(() => {
+    if (!hostPlanning) {
+      planningStartedAtRef.current = null;
+      return;
+    }
+    planningStartedAtRef.current ??= Date.now();
+    setPlanningNow(Date.now());
+    const timer = window.setInterval(() => setPlanningNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [hostPlanning]);
+
+  // Post-approval execution view: poll GET /v1/runs/{id} every
+  // HOST_EXECUTION_POLL_MS while the run is moving on its own (or while our
+  // own Approve request is still open -- the host drives the run inside it),
+  // and paint per-step status onto the canvas nodes. Starts on load (a
+  // reopened run may already be executing) and again on every
+  // hostExecutionWatch bump (Approve). Fail-soft: a failed read is retried on
+  // the next tick and never touches hostLoadError.
+  const hostRunId = hostMode?.runId ?? '';
+  const hostCanvasLoaded = hostCanvas !== null;
+  useEffect(() => {
+    if (!hostMode || !hostRunId || !hostCanvasLoaded) {
+      setHostExecution(null);
+      return;
+    }
+    const HOST_EXECUTION_POLL_MS = 2000;
+    let cancelled = false;
+    let timer: number | undefined;
+    let sawActive = false;
+    const tick = (): void => {
+      void loadHostRunExecution(hostMode)
+        .then((execution) => {
+          if (cancelled) return;
+          setHostExecution(execution);
+          const active = isHostRunExecutionActive(execution.status);
+          if (active) sawActive = true;
+          if (active || approveInFlightRef.current) {
+            timer = window.setTimeout(tick, HOST_EXECUTION_POLL_MS);
+            return;
+          }
+          if (sawActive) refreshHostCanvasAfterExecutionRef.current();
+        })
+        .catch(() => {
+          if (cancelled) return;
+          timer = window.setTimeout(tick, HOST_EXECUTION_POLL_MS);
+        });
+    };
+    tick();
+    return () => {
+      cancelled = true;
+      if (timer !== undefined) window.clearTimeout(timer);
+    };
+  }, [hostMode, hostRunId, hostCanvasLoaded, hostExecutionWatch]);
+
 
   // Run-history picker: hostMode set, no runId yet -- list every run on the
   // connected host so the operator can pick one. Refetches whenever the
@@ -969,6 +1201,16 @@ function WorkflowPlaygroundSurface({
     undo,
   });
 
+  // Host-mode nodes show the host run's per-step execution state; a local
+  // simulation run (if the operator starts one) still takes precedence.
+  const displayStatuses = useMemo(
+    () =>
+      hostExecution && !running
+        ? { ...hostExecution.nodeStatuses, ...statuses }
+        : statuses,
+    [hostExecution, running, statuses],
+  );
+
   const { displayEdges, displayNodes } = useWorkflowPlaygroundElements({
     beginEdit: beginDrag,
     beginEdgeLabelEdit,
@@ -993,7 +1235,7 @@ function WorkflowPlaygroundSurface({
     selectedEdgeId,
     editingEdgeId,
     selectedNodeId,
-    statuses,
+    statuses: displayStatuses,
   });
 
   const resetWorkflow = useCallback(() => {
@@ -1176,7 +1418,11 @@ function WorkflowPlaygroundSurface({
   const submitNewRunOnHost = useCallback(
     async (taskText: string, permissionCeiling: string[]) => {
       if (!hostMode) return;
-      const runId = await submitNewRun(hostMode, taskText, permissionCeiling);
+      // Navigate as soon as the run id is minted: POST /v1/runs only
+      // answers once planning is over, and the run page is where planning
+      // progress is shown. A start failure surfaces there (see the load
+      // effect's pendingRunStart handling), not in this dialog.
+      const { runId } = beginNewRun(hostMode, taskText, permissionCeiling);
       selectHostRun(runId);
     },
     [hostMode, selectHostRun],
@@ -1230,7 +1476,19 @@ function WorkflowPlaygroundSurface({
           tenantId: hostMode.tenantId,
           principalRef: hostMode.principalRef,
           approved: true,
-        }).then((record) => client.resumeHook(token, record));
+        }).then((record) => {
+          // The host executes the approved plan inside this resume request,
+          // so it may not return for minutes. Poll the run snapshot meanwhile
+          // so the canvas shows which step is running instead of freezing.
+          approveInFlightRef.current = true;
+          setHostExecutionWatch((value) => value + 1);
+          setAnnouncement(
+            locale === 'zh'
+              ? '已批准，正在执行…'
+              : 'Approved, executing…',
+          );
+          return client.resumeHook(token, record);
+        });
       })
       .then((snapshot) => {
         const status =
@@ -1252,12 +1510,22 @@ function WorkflowPlaygroundSurface({
           setHostCanvas(refreshed);
           lastSavedPlanStepsRef.current = JSON.stringify(refreshed.plan.steps);
           restore(graphFromHostCanvas(refreshed, locale, catalog));
+          void loadHostRecoveryFailure(hostMode)
+            .then((failure) => setHostRecoveryFailure(failure))
+            .catch(() => setHostRecoveryFailure(null));
         });
       })
       .catch((error: unknown) => {
         setAnnouncement(error instanceof Error ? error.message : String(error));
       })
-      .finally(() => setHostBusy(false));
+      .finally(() => {
+        setHostBusy(false);
+        if (approveInFlightRef.current) {
+          approveInFlightRef.current = false;
+          // One last snapshot read so node statuses match the final state.
+          setHostExecutionWatch((value) => value + 1);
+        }
+      });
   }, [
     catalog,
     hostCanvas,
@@ -1267,6 +1535,61 @@ function WorkflowPlaygroundSurface({
     restore,
     saveCanvasToHost,
   ]);
+
+  // Refetch after a run the poll saw executing settles without an Approve
+  // request of ours (e.g. the page was reopened mid-execution): refresh
+  // flow_status (Save/Approve gating) and the recovery check.
+  refreshHostCanvasAfterExecutionRef.current = () => {
+    if (!hostMode?.runId) return;
+    const client = createHostClient(hostMode);
+    void client
+      .getProposal(hostMode.runId)
+      .then((proposal) => {
+        const refreshed = refreshCanvasFromProposalDto(proposal);
+        setHostCanvas(refreshed);
+        lastSavedPlanStepsRef.current = JSON.stringify(refreshed.plan.steps);
+        restore(graphFromHostCanvas(refreshed, locale, catalog));
+      })
+      .catch(() => {});
+    void loadHostRecoveryFailure(hostMode)
+      .then((failure) => setHostRecoveryFailure(failure))
+      .catch(() => setHostRecoveryFailure(null));
+  };
+
+  // Single-step-execution-failure recovery: submit a human-edited decision
+  // for the run's open recovery hook. Throws on rejection (400 REJECTED:
+  // ...) so the dialog can show the error and stay open -- the hook stays
+  // resumable, unconsumed by a rejected edit, so the operator can correct
+  // the fields and resubmit. On acceptance, refetch both the proposal and
+  // the recovery check: the recovery hook is now closed and the run is
+  // running again, so both hostCanvas.flow_status and hostRecoveryFailure
+  // must reflect that immediately.
+  const submitRecoveryEditOnHost = useCallback(
+    async (edit: WorkflowPlaygroundRecoveryEdit) => {
+      if (!hostMode) return;
+      // Like Approve, the host re-drives the run inside this request.
+      approveInFlightRef.current = true;
+      setHostExecutionWatch((value) => value + 1);
+      try {
+        await submitRecoveryEdit(hostMode, edit);
+      } finally {
+        approveInFlightRef.current = false;
+        setHostExecutionWatch((value) => value + 1);
+      }
+      const client = createHostClient(hostMode);
+      const proposal = await client.getProposal(hostMode.runId);
+      const refreshed = refreshCanvasFromProposalDto(proposal);
+      setHostCanvas(refreshed);
+      lastSavedPlanStepsRef.current = JSON.stringify(refreshed.plan.steps);
+      restore(graphFromHostCanvas(refreshed, locale, catalog));
+      const failure = await loadHostRecoveryFailure(hostMode).catch(() => null);
+      setHostRecoveryFailure(failure);
+      setAnnouncement(
+        locale === 'zh' ? '已提交恢复决定' : 'Recovery decision submitted',
+      );
+    },
+    [catalog, hostMode, locale, restore],
+  );
 
   const addHostStep = useCallback(() => {
     if (!hostMode || !hostCanvas) return;
@@ -1477,6 +1800,11 @@ function WorkflowPlaygroundSurface({
   // status inside its own request (see approveOnHost's refetch above).
   const hostEdits =
     hostCanvas && hostMode?.runId ? hostRunEditActions(hostCanvas) : null;
+  // Deliberately independent of hostEdits/hostCanvas.flow_status -- see
+  // hostRecoveryFailure's doc comment above.
+  const canRecoverOnHost = Boolean(
+    hostMode?.runId && hostCanvas && hostRecoveryFailure,
+  );
   const shellClass = [
     'a3s-workflow-playground',
     rightPanelOpen ? 'has-right-panel' : '',
@@ -1527,6 +1855,9 @@ function WorkflowPlaygroundSurface({
         onExport={exportGraph}
         onHostAddStep={hostEdits?.addStep ? addHostStep : undefined}
         onHostApprove={hostEdits?.approve ? approveOnHost : undefined}
+        onHostRecover={
+          canRecoverOnHost ? () => setRecoveryDialogOpen(true) : undefined
+        }
         onHostSave={hostEdits?.save ? saveToHost : undefined}
         onOpenDocument={openDocument}
         onOpenExtensions={toggleExtensions}
@@ -1552,19 +1883,54 @@ function WorkflowPlaygroundSurface({
             : undefined
         }
         hostFlowStatus={
-          typeof hostCanvas?.flow_status === 'string'
-            ? hostCanvas.flow_status
+          hostExecution?.status
+            ? hostExecution.status
+            : typeof hostCanvas?.flow_status === 'string'
+              ? hostCanvas.flow_status
+              : undefined
+        }
+        execution={
+          hostExecution && isHostRunExecutionActive(hostExecution.status)
+            ? {
+                runningStepIds: hostExecution.runningStepIds,
+                completed: hostExecution.completedStepCount,
+                total: Array.isArray(hostCanvas?.plan?.steps)
+                  ? hostCanvas.plan.steps.length
+                  : null,
+              }
+            : undefined
+        }
+        progress={
+          hostProgress
+            ? {
+                stepIndex: hostProgress.step_index,
+                total: hostProgress.total,
+                agentId: hostProgress.agent_id,
+              }
+            : undefined
+        }
+        planning={
+          hostPlanning && !hostCanvas
+            ? {
+                elapsedSecs: Math.max(
+                  0,
+                  Math.floor(
+                    (planningNow -
+                      (planningStartedAtRef.current ?? planningNow)) /
+                      1000,
+                  ),
+                ),
+                phase: hostPlanningPhase?.phase,
+                tool: hostPlanningPhase?.tool,
+                modelCalls: hostPlanningPhase?.model_calls,
+              }
             : undefined
         }
         saveState={saveState}
         extensionsOpen={extensionsOpen}
         version={version}
         versions={versions}
-        workflowName={
-          hostMode && hostCanvas?.preview_only?.execution_digest
-            ? `${example.title} · ${String(hostCanvas.preview_only.execution_digest).slice(0, 12)}`
-            : example.title
-        }
+        workflowName={hostMode?.runId && hostTaskText ? hostTaskText : example.title}
       />
       {hostLoadError ? (
         <p data-testid="host-load-error" role="alert">
@@ -1932,6 +2298,36 @@ function WorkflowPlaygroundSurface({
           onSubmit={submitTriggerInput}
           schema={triggerSchema}
           workflowName={example.title}
+        />
+      )}
+
+      {recoveryDialogOpen && hostRecoveryFailure && (
+        <WorkflowPlaygroundRecoveryDialog
+          agentRefs={
+            Array.isArray(hostCanvas?.plan?.agent_refs)
+              ? (hostCanvas.plan.agent_refs as JsonObject[])
+              : []
+          }
+          busy={recoveryBusy}
+          error={recoveryError}
+          failure={hostRecoveryFailure}
+          locale={locale}
+          onClose={() => {
+            setRecoveryDialogOpen(false);
+            setRecoveryError(null);
+          }}
+          onSubmit={(edit) => {
+            setRecoveryBusy(true);
+            setRecoveryError(null);
+            void submitRecoveryEditOnHost(edit)
+              .then(() => setRecoveryDialogOpen(false))
+              .catch((error: unknown) => {
+                setRecoveryError(
+                  error instanceof Error ? error.message : String(error),
+                );
+              })
+              .finally(() => setRecoveryBusy(false));
+          }}
         />
       )}
 

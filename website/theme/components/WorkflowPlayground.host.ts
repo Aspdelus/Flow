@@ -4,7 +4,9 @@ import {
   type A3SFlowDagNodeRegistry,
   type FlowTaskEnvelope,
   type HostCanvasDocument,
+  type HostComposeProgressFrame,
   type HostPlanStepNode,
+  type HostRecoveryFailure,
   type JsonObject,
   applyCanvasNodeEdits,
   canvasDocumentFromProposalDto,
@@ -12,6 +14,7 @@ import {
   FlowHostClient,
   HostClientError,
   parseHostModeSearch,
+  recoveryFailureFromDto,
 } from '@a3s-lab/flow-ui';
 import type { FlowWebsiteLocale } from './flow-node-catalog';
 import type { WorkflowExampleDefinition } from './WorkflowPlayground.examples';
@@ -149,6 +152,31 @@ export async function submitNewRun(
   taskText: string,
   permissionCeiling: string[],
 ): Promise<string> {
+  const { runId, started } = beginNewRun(config, taskText, permissionCeiling);
+  await started;
+  return runId;
+}
+
+// Start requests still in flight (or that failed), keyed by run id, so the
+// run page a caller navigated to right away can tell "not created yet" from
+// "does not exist" and surface a start failure. Successful starts are
+// dropped once settled -- the run exists from then on.
+const pendingRunStarts = new Map<string, Promise<void>>();
+
+/**
+ * Like {@link submitNewRun}, but returns the minted run id immediately.
+ * `POST /v1/runs` does not answer until the orchestrator has finished
+ * planning (a real model takes minutes), so a caller that awaited it would
+ * sit on a "Submitting..." dialog the whole time and never get to show
+ * planning progress. `started` settles when the host answers; it rejects
+ * with the host's own error text. Blank task text throws synchronously,
+ * before any request.
+ */
+export function beginNewRun(
+  config: HostModeConfig,
+  taskText: string,
+  permissionCeiling: string[],
+): { runId: string; started: Promise<void> } {
   const trimmed = taskText.trim();
   if (!trimmed) {
     throw new HostClientError('INVALID_INPUT: task text is required');
@@ -160,13 +188,84 @@ export async function submitNewRun(
     permission_ceiling: permissionCeiling,
     approval_token: mintApprovalToken(),
   };
-  const { status, json } = await client.startRun(runId, envelope);
-  if (status < 200 || status >= 300) {
-    const message =
-      typeof json.error === 'string' ? json.error : `HTTP ${status}`;
-    throw new HostClientError(`INVALID_INPUT: ${message}`);
-  }
-  return runId;
+  const started = client.startRun(runId, envelope).then(({ status, json }) => {
+    if (status < 200 || status >= 300) {
+      const message =
+        typeof json.error === 'string' ? json.error : `HTTP ${status}`;
+      throw new HostClientError(`INVALID_INPUT: ${message}`);
+    }
+  });
+  pendingRunStarts.set(runId, started);
+  started.then(
+    () => pendingRunStarts.delete(runId),
+    () => {},
+  );
+  return { runId, started };
+}
+
+/**
+ * The task text the run was started with (`input.task_text` on the Flow
+ * snapshot) -- what the user actually asked for, used as the page title.
+ * `null` when the snapshot has none.
+ */
+export async function loadHostRunTaskText(
+  config: HostModeConfig,
+): Promise<string | null> {
+  const client = createHostClient(config);
+  const snapshot = await client.getRun(config.runId);
+  const input = isRecord(snapshot.input) ? snapshot.input : null;
+  const text = input && typeof input.task_text === 'string' ? input.task_text : '';
+  return text.trim() ? text.trim() : null;
+}
+
+/** The in-flight (or failed) start of a run begun by {@link beginNewRun} in
+ * this page, if any. */
+export function pendingRunStart(runId: string): Promise<void> | undefined {
+  return pendingRunStarts.get(runId);
+}
+
+/**
+ * Why a completed run has no proposal to open: the orchestrator refused to
+ * plan (`output.refusal.reason_codes` on the Flow snapshot, e.g.
+ * `PLANNER_OUTPUT_INVALID`). `null` when the run carries no refusal.
+ * `GET /v1/runs/{id}/proposal` only says "plan output has no proposal".
+ */
+export async function loadHostPlanRefusal(
+  config: HostModeConfig,
+): Promise<string[] | null> {
+  const client = createHostClient(config);
+  const snapshot = await client.getRun(config.runId);
+  const output = isRecord(snapshot.output) ? snapshot.output : null;
+  const refusal = output && isRecord(output.refusal) ? output.refusal : null;
+  if (!refusal) return null;
+  const codes = Array.isArray(refusal.reason_codes)
+    ? refusal.reason_codes.filter(
+        (code): code is string => typeof code === 'string',
+      )
+    : [];
+  return codes;
+}
+
+/** True for `GET /v1/runs/{id}/proposal`'s 400 on a run whose plan step
+ * finished without a proposal (a refusal), as opposed to one still planning. */
+export function isProposalRefused(error: unknown): boolean {
+  if (!(error instanceof HostClientError) || error.status !== 400) return false;
+  const body = error.body;
+  const message =
+    body && typeof body === 'object' && 'error' in body
+      ? String((body as { error: unknown }).error)
+      : '';
+  return message.includes('plan output has no proposal');
+}
+
+/** True for a 404 on a run id this page has a start request out for -- the
+ * host has not created the run yet, it is not missing. */
+export function isRunNotYetCreated(error: unknown, runId: string): boolean {
+  return (
+    error instanceof HostClientError &&
+    error.status === 404 &&
+    pendingRunStarts.has(runId)
+  );
 }
 
 /**
@@ -195,6 +294,93 @@ export async function loadHostCanvas(
 ): Promise<HostCanvasDocument> {
   const client = createHostClient(config);
   return client.openCanvas(config.runId);
+}
+
+/**
+ * `null` when the run has no open recovery hook right now (the ordinary
+ * case: running, completed, or suspended for an unrelated reason). Never
+ * throws on that 404 -- only a genuine network/host failure propagates, and
+ * the caller (WorkflowPlayground.tsx) tolerates even that by treating a
+ * failed recovery check the same as "no recovery," so a host that doesn't
+ * yet support this endpoint can't break the main canvas load.
+ */
+export async function loadHostRecoveryFailure(
+  config: HostModeConfig,
+): Promise<HostRecoveryFailure | null> {
+  const client = createHostClient(config);
+  const { status, json } = await client.getRecoveryFailure(config.runId);
+  if (status === 404) return null;
+  if (status < 200 || status >= 300) {
+    const message =
+      typeof json.error === 'string' ? json.error : `HTTP ${status}`;
+    throw new HostClientError(`INVALID_INPUT: ${message}`);
+  }
+  return recoveryFailureFromDto(json);
+}
+
+/**
+ * Submit a human-edited recovery decision for the run's open recovery hook.
+ * Throws on rejection (400 `REJECTED: ...`) so the recovery dialog can show
+ * the error and stay open -- the hook is left untouched by a rejected edit,
+ * so the operator can correct the fields and resubmit.
+ */
+export async function submitRecoveryEdit(
+  config: HostModeConfig,
+  edit: {
+    agentId?: string;
+    version?: string;
+    objective?: string;
+    context?: JsonObject;
+  },
+): Promise<void> {
+  const client = createHostClient(config);
+  const body: JsonObject = {};
+  if (edit.agentId !== undefined && edit.version !== undefined) {
+    body.agent_id = edit.agentId;
+    body.version = edit.version;
+  }
+  if (edit.objective !== undefined) body.objective = edit.objective;
+  if (edit.context !== undefined) body.context = edit.context;
+  const { status, json } = await client.postResumeAfterFailure(
+    config.runId,
+    body,
+  );
+  if (status < 200 || status >= 300) {
+    const message =
+      typeof json.error === 'string' ? json.error : `HTTP ${status}`;
+    throw new HostClientError(`INVALID_INPUT: ${message}`, status, json);
+  }
+}
+
+/**
+ * Subscribe to `GET /v1/runs/{run_id}/progress` (`follow=true`) and call
+ * `onEvent` for each `host.compose-progress.v1` frame as it arrives. Only
+ * genuinely long-lived helper in this file -- every other one here is a
+ * single promise a `cancelled` flag can safely ignore once settled, but a
+ * `follow=true` stream keeps the underlying fetch open, so cancellation must
+ * actually abort the request via `options.signal` (the caller owns the
+ * `AbortController`, e.g. tearing it down on unmount or once the proposal
+ * arrives). Resolves once the stream ends or is aborted; never throws --
+ * progress is a fail-soft overlay, not a gate on open/save/approve/recover.
+ */
+export async function subscribeToHostProgress(
+  config: HostModeConfig,
+  runId: string,
+  onEvent: (frame: HostComposeProgressFrame) => void,
+  options: { signal?: AbortSignal } = {},
+): Promise<void> {
+  const client = createHostClient(config);
+  try {
+    for await (const frame of client.getProgressStream(runId, {
+      follow: true,
+      signal: options.signal,
+    })) {
+      onEvent(frame);
+    }
+  } catch {
+    // fail-soft: network errors and AbortError both end the subscription
+    // quietly -- progress is a nice-to-have overlay, never a hard dependency.
+  }
 }
 
 /**
@@ -247,6 +433,111 @@ export async function listHostRuns(
 
 function isRecord(value: unknown): value is JsonObject {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/** Canvas node runtime status, same vocabulary as local Playground runs. */
+export type HostNodeRuntimeStatus = NonNullable<
+  PlaygroundNode['data']['runtimeStatus']
+>;
+
+/**
+ * Post-approval execution state of one host run, projected from the Flow
+ * `WorkflowRunSnapshot` (`GET /v1/runs/{id}`) onto canvas node ids.
+ * `status` is the lowercased Flow `WorkflowRunStatus`; `nodeStatuses` is
+ * keyed by plan `step_id` (== canvas node id, see graphFromHostCanvas).
+ */
+export type HostRunExecution = {
+  status: string;
+  nodeStatuses: Record<string, HostNodeRuntimeStatus>;
+  /** Plan step ids whose latest attempt is running right now. */
+  runningStepIds: string[];
+  completedStepCount: number;
+  failedStepCount: number;
+};
+
+/** Flow run statuses under which the run is still moving on its own, so
+ * polling its snapshot can observe further change. `suspended` is excluded
+ * on purpose: an approval/recovery hook needs a human, not a poll. */
+const ACTIVE_FLOW_RUN_STATUSES = new Set(['pending', 'running', 'cancelling']);
+
+export function isHostRunExecutionActive(status: string): boolean {
+  return ACTIVE_FLOW_RUN_STATUSES.has(status.toLowerCase());
+}
+
+// Agent steps are scheduled as `agent:<step_id>` and, after a recovery
+// edit, `agent:<step_id>.retry<n>` (adapters/flow-host/src/lib.rs
+// recovery_flow_step_id). Everything else (`orchestrator.plan`,
+// `orchestrator.plan.r1`, ...) has no canvas node.
+const AGENT_FLOW_STEP_ID = /^agent:(.+?)(?:\.retry(\d+))?$/;
+function nodeStatusFromFlowStepStatus(status: string): HostNodeRuntimeStatus {
+  switch (status.toLowerCase()) {
+    case 'running':
+      return 'running';
+    case 'completed':
+      return 'success';
+    case 'failed':
+    case 'cancelled':
+      return 'error';
+    case 'pending':
+      return 'waiting';
+    default:
+      return 'idle';
+  }
+}
+
+export function hostRunExecutionFromSnapshot(
+  snapshot: unknown,
+): HostRunExecution {
+  const record = isRecord(snapshot) ? snapshot : {};
+  const status =
+    typeof record.status === 'string' ? record.status.toLowerCase() : '';
+  const steps = isRecord(record.steps) ? record.steps : {};
+  // Latest attempt wins: a failed `agent:x` followed by a running
+  // `agent:x.retry1` must read as running, not failed.
+  const latest = new Map<string, { attempt: number; status: string }>();
+  for (const [flowStepId, step] of Object.entries(steps)) {
+    const match = AGENT_FLOW_STEP_ID.exec(flowStepId);
+    if (!match || !isRecord(step) || typeof step.status !== 'string') continue;
+    const stepId = match[1];
+    const attempt = match[2] === undefined ? 0 : Number(match[2]);
+    const previous = latest.get(stepId);
+    if (!previous || attempt >= previous.attempt) {
+      latest.set(stepId, { attempt, status: step.status });
+    }
+  }
+  const nodeStatuses: Record<string, HostNodeRuntimeStatus> = {};
+  const runningStepIds: string[] = [];
+  let completedStepCount = 0;
+  let failedStepCount = 0;
+  for (const [stepId, { status: stepStatus }] of latest) {
+    const nodeStatus = nodeStatusFromFlowStepStatus(stepStatus);
+    nodeStatuses[stepId] = nodeStatus;
+    if (nodeStatus === 'running') runningStepIds.push(stepId);
+    if (nodeStatus === 'success') completedStepCount += 1;
+    if (nodeStatus === 'error') failedStepCount += 1;
+  }
+  runningStepIds.sort();
+  if (latest.size > 0) nodeStatuses.start = 'success';
+  if (status === 'completed') nodeStatuses.done = 'success';
+  else if (status === 'failed' || status === 'cancelled') {
+    nodeStatuses.done = 'error';
+  }
+  return {
+    status,
+    nodeStatuses,
+    runningStepIds,
+    completedStepCount,
+    failedStepCount,
+  };
+}
+
+/** One `GET /v1/runs/{id}` read, projected for the canvas. Throws on host
+ * errors -- the caller (a poll loop) decides whether that is fatal. */
+export async function loadHostRunExecution(
+  config: HostModeConfig,
+): Promise<HostRunExecution> {
+  const client = createHostClient(config);
+  return hostRunExecutionFromSnapshot(await client.getRun(config.runId));
 }
 
 function controlSourceHandle(
