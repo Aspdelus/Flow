@@ -23,6 +23,7 @@ import {
   Plus,
   Sparkle,
   Stop,
+  SealCheck,
   TreeStructure,
   WarningCircle,
 } from '@phosphor-icons/react';
@@ -145,6 +146,8 @@ type PlaygroundHeaderProps = {
    * WorkflowPlaygroundRecoveryDialog's doc comment) -- independent of
    * `hostFlowStatus`/Save/Approve visibility on purpose. */
   onHostRecover?: () => void;
+  /** Set only while the run waits on a mid-plan approval gate. */
+  onHostReviewGate?: () => void;
 };
 /** Short, human-scannable plan id from a `sha256:<hex>` digest. */
 export function shortPlanId(digest: string): string {
@@ -235,6 +238,7 @@ export function WorkflowPlaygroundHeader({
   onHostApprove,
   onHostAddStep,
   onHostRecover,
+  onHostReviewGate,
 }: PlaygroundHeaderProps) {
   const menuRef = useDismissibleDetails();
 
@@ -339,6 +343,18 @@ export function WorkflowPlaygroundHeader({
           >
             {executionLabel(execution, locale)}
           </span>
+        ) : null}
+        {hostMode && onHostReviewGate ? (
+          <button
+            className="is-primary"
+            data-testid="host-review-gate"
+            disabled={hostBusy || running}
+            onClick={onHostReviewGate}
+            type="button"
+          >
+            <SealCheck aria-hidden="true" weight="fill" />
+            <span>{locale === 'zh' ? '待审批' : 'Review'}</span>
+          </button>
         ) : null}
         {hostMode && onHostRecover ? (
           <button

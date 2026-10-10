@@ -218,6 +218,80 @@ export async function issueApprovalRecord(input: {
   return { ...body, approval_digest };
 }
 
+export const GATE_APPROVAL_SCHEMA = 'host.gate-approval.v1';
+
+/** A reviewer's decision on one mid-plan approval gate of one run. */
+export type GateApprovalRecord = {
+  schema_version: typeof GATE_APPROVAL_SCHEMA;
+  proposal_digest: string;
+  run_id: string;
+  step_id: string;
+  tenant_id: string;
+  principal_ref: string;
+  approved: boolean;
+  comment: string;
+  decided_at_utc: string;
+  approval_digest: string;
+};
+
+/** `GET /v1/runs/{run_id}/gate`: the run's open approval gate. */
+export type HostGateRequest = {
+  run_id: string;
+  step_id: string;
+  objective: string;
+  proposal_digest: string;
+  tenant_id: string;
+  /** Upstream outputs the reviewer checks (`host.agent-step-prompt` input shape). */
+  inputs: JsonObject[];
+};
+
+export function gateRequestFromDto(dto: JsonObject): HostGateRequest | null {
+  const metadata = (dto.metadata ?? {}) as JsonObject;
+  const stepId = typeof dto.step_id === 'string' ? dto.step_id : '';
+  const proposalDigest =
+    typeof metadata.proposal_digest === 'string' ? metadata.proposal_digest : '';
+  if (!stepId || !proposalDigest) return null;
+  return {
+    run_id: typeof dto.run_id === 'string' ? dto.run_id : '',
+    step_id: stepId,
+    objective: typeof metadata.objective === 'string' ? metadata.objective : '',
+    proposal_digest: proposalDigest,
+    tenant_id: typeof metadata.tenant_id === 'string' ? metadata.tenant_id : '',
+    inputs: Array.isArray(metadata.inputs)
+      ? (metadata.inputs.filter(
+          (input) => input && typeof input === 'object',
+        ) as JsonObject[])
+      : [],
+  };
+}
+
+/** Issue `host.gate-approval.v1`: digest over the body without approval_digest
+ * (byte-identical to the host's `GateApprovalRecord::issue`). */
+export async function issueGateApprovalRecord(input: {
+  proposalDigest: string;
+  runId: string;
+  stepId: string;
+  tenantId: string;
+  principalRef: string;
+  approved: boolean;
+  comment?: string;
+  decidedAt?: Date;
+}): Promise<GateApprovalRecord> {
+  const body = {
+    schema_version: GATE_APPROVAL_SCHEMA as typeof GATE_APPROVAL_SCHEMA,
+    proposal_digest: input.proposalDigest,
+    run_id: input.runId,
+    step_id: input.stepId,
+    tenant_id: input.tenantId,
+    principal_ref: input.principalRef,
+    approved: input.approved,
+    comment: input.comment ?? '',
+    decided_at_utc: formatUtc(input.decidedAt ?? new Date()),
+  };
+  const approval_digest = await sha256Digest(body);
+  return { ...body, approval_digest };
+}
+
 export class FlowHostClient {
   readonly baseUrl: string;
   private readonly fetchImpl: typeof fetch;
@@ -557,6 +631,47 @@ export class FlowHostClient {
     const { json } = await this.request(
       'GET',
       `/v1/hooks/${encodeURIComponent(token)}`,
+    );
+    return (json ?? {}) as JsonObject;
+  }
+
+  /**
+   * `GET /v1/runs/{run_id}/gate` -- present only while the run waits on a
+   * mid-plan approval gate. A 404 ("no open gate") is a normal outcome, so
+   * this returns `{status, json}` like `getRecoveryFailure`.
+   */
+  async getOpenGate(runId: string): Promise<{ status: number; json: JsonObject }> {
+    if (!runId.trim()) {
+      throw new HostClientError('INVALID_INPUT: runId is required');
+    }
+    try {
+      const { status, json } = await this.request(
+        'GET',
+        `/v1/runs/${encodeURIComponent(runId)}/gate`,
+      );
+      return { status, json: (json ?? {}) as JsonObject };
+    } catch (error) {
+      if (error instanceof HostClientError && error.status !== undefined) {
+        return { status: error.status, json: (error.body ?? {}) as JsonObject };
+      }
+      throw error;
+    }
+  }
+
+  /** `POST /v1/runs/{run_id}/gate/{step_id}` -- decide the open gate; the
+   * host drives the run forward inside this request. */
+  async decideGate(
+    runId: string,
+    stepId: string,
+    record: GateApprovalRecord,
+  ): Promise<JsonObject> {
+    if (!runId.trim() || !stepId.trim()) {
+      throw new HostClientError('INVALID_INPUT: runId and stepId are required');
+    }
+    const { json } = await this.request(
+      'POST',
+      `/v1/runs/${encodeURIComponent(runId)}/gate/${encodeURIComponent(stepId)}`,
+      record,
     );
     return (json ?? {}) as JsonObject;
   }

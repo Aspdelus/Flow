@@ -2,7 +2,9 @@ import {
   FlowHostClient,
   HostClientError,
   canonicalJson,
+  gateRequestFromDto,
   issueApprovalRecord,
+  issueGateApprovalRecord,
   parseHostModeSearch,
   sha256Digest,
 } from '../src/integrations/host-client';
@@ -965,6 +967,54 @@ describe('FlowHostClient', () => {
       fetchImpl: fetchImpl as unknown as typeof fetch,
     });
     expect(await client.resumeHook('tok-1', approval)).toEqual({});
+  });
+
+  it('issues gate decisions byte-identical to the host (shared vector)', async () => {
+    const record = await issueGateApprovalRecord({
+      proposalDigest: 'sha256:p',
+      runId: 'run-1',
+      stepId: 'signoff',
+      tenantId: 'tenant',
+      principalRef: 'reviewer@local',
+      approved: true,
+      comment: '看过了',
+      decidedAt: new Date('2026-10-09T12:00:00Z'),
+    });
+    // adapters/flow-host control_flow::tests::the_gate_record_digest_matches_the_shared_vector
+    expect(record.approval_digest).toBe(
+      'sha256:46dacac66319ebfc4e0445dd313321df8f15e31a1f08a5c582cb9112f829f46a',
+    );
+  });
+
+  it('reads the open gate and posts one decision to its run-scoped route', async () => {
+    const calls: Array<{ url: string; method: string; body?: string }> = [];
+    const fetchImpl = vi.fn(async (url: string, init?: RequestInit) => {
+      calls.push({ url, method: init?.method ?? 'GET', body: init?.body as string | undefined });
+      if (url.endsWith('/gate')) {
+        return new Response(
+          JSON.stringify({
+            run_id: 'run-1',
+            step_id: 'signoff',
+            metadata: { objective: 'check', proposal_digest: 'sha256:p', tenant_id: 't', inputs: [{ reference: 'fix.patch', value: 'diff' }] },
+          }),
+          { status: 200 },
+        );
+      }
+      return new Response(JSON.stringify({ status: 'completed' }), { status: 200 });
+    });
+    const client = new FlowHostClient({ baseUrl: 'http://127.0.0.1:9', fetchImpl: fetchImpl as unknown as typeof fetch });
+    const { status, json } = await client.getOpenGate('run-1');
+    expect(status).toBe(200);
+    const gate = gateRequestFromDto(json);
+    expect(gate).toMatchObject({ step_id: 'signoff', objective: 'check', proposal_digest: 'sha256:p' });
+    expect(gate?.inputs[0].reference).toBe('fix.patch');
+    const record = await issueGateApprovalRecord({
+      proposalDigest: gate!.proposal_digest, runId: 'run-1', stepId: gate!.step_id, tenantId: 't', principalRef: 'r', approved: false,
+    });
+    expect(await client.decideGate('run-1', 'signoff', record)).toEqual({ status: 'completed' });
+    expect(calls[1].url).toBe('http://127.0.0.1:9/v1/runs/run-1/gate/signoff');
+    expect(JSON.parse(calls[1].body!).approved).toBe(false);
+    expect(gateRequestFromDto({ step_id: '', metadata: {} })).toBeNull();
   });
 
   it('getRecoveryFailure defaults json to {} when the host returns an empty 2xx body', async () => {

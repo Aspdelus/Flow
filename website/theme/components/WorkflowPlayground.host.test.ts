@@ -1316,6 +1316,7 @@ describe('WorkflowPlayground host mode', () => {
       nodeStatuses: {},
       runningStepIds: [],
       skippedStepIds: [],
+      openGateStepId: null,
       completedStepCount: 0,
       failedStepCount: 0,
     });
@@ -1627,6 +1628,30 @@ describe('WorkflowPlayground host mode: control-flow plan steps', () => {
     expect(JSON.parse(JSON.stringify(saved.plan.steps))).toEqual(plan.steps);
     expect(saved.plan.edges).toEqual(plan.edges);
     expect(saved.plan.execution_order).toEqual(plan.execution_order);
+  });
+
+  it('paints the decided condition, the waiting gate and, at the end, the skipped steps', () => {
+    const waiting = hostRunExecutionFromSnapshot({
+      status: 'suspended',
+      steps: {
+        'agent:inventory': { status: 'completed' },
+        'cond:route': { status: 'completed' },
+        'agent:tax': { status: 'completed' },
+      },
+      hooks: { approval: { status: 'received' }, 'gate:signoff': { status: 'active' } },
+    });
+    expect(waiting.nodeStatuses).toMatchObject({ route: 'success', 'route~1': 'success', tax: 'success', signoff: 'waiting' });
+    expect(waiting.openGateStepId).toBe('signoff');
+    expect(waiting.completedStepCount).toBe(3);
+    const done = hostRunExecutionFromSnapshot({
+      status: 'completed',
+      steps: { 'cond:route': { status: 'completed' } },
+      hooks: { 'gate:signoff': { status: 'received' } },
+      output: { skipped_steps: ['backorder'] },
+    });
+    expect(done.nodeStatuses.signoff).toBe('success');
+    expect(done.openGateStepId).toBeNull();
+    expect(done.skippedStepIds).toEqual(['backorder']);
   });
 });
 
