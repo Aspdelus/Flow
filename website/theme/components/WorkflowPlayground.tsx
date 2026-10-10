@@ -1919,6 +1919,7 @@ function WorkflowPlaygroundSurface({
         onHostReviewGate={
           hostOpenGate ? () => setGateDialogOpen(true) : undefined
         }
+        planWarnings={hostCanvas?.plan_check_problems ?? []}
         onHostSave={hostEdits?.save ? saveToHost : undefined}
         onOpenDocument={openDocument}
         onOpenExtensions={toggleExtensions}

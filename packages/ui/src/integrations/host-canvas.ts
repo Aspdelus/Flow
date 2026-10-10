@@ -29,6 +29,24 @@ export type HostPlanStepNode = {
   plan_step: JsonObject;
 };
 
+/** One `host.plan-check.v1` finding. */
+export type HostPlanProblem = {
+  severity: 'error' | 'warning';
+  code: string;
+  step_id: string | null;
+  message: string;
+};
+
+function planCheckProblems(view: unknown): HostPlanProblem[] {
+  const problems = isObject(view) && Array.isArray(view.problems) ? view.problems : [];
+  return problems.filter(isObject).map((problem) => ({
+    severity: problem.severity === 'error' ? 'error' : 'warning',
+    code: String(problem.code ?? ''),
+    step_id: typeof problem.step_id === 'string' ? problem.step_id : null,
+    message: String(problem.message ?? ''),
+  }));
+}
+
 export type HostCanvasDocument = {
   schema_version: typeof CANVAS_SCHEMA;
   authority: typeof PLAN_SCHEMA;
@@ -55,6 +73,10 @@ export type HostCanvasDocument = {
     token: unknown;
     resume_path: string;
   };
+  /** Design findings the host computed for this plan (`host.plan-check.v1`);
+   * only warnings reach a verified proposal. Empty when the host predates
+   * plan checks or the plan is an edited overlay. */
+  plan_check_problems: HostPlanProblem[];
   save: {
     method: 'POST';
     path: string;
@@ -260,6 +282,7 @@ export function canvasDocumentFromProposalDto(
       token: dto.approval_token,
       resume_path: '/v1/hooks/{token}/resume',
     },
+    plan_check_problems: planCheckProblems(dto.plan_check),
     save: {
       method: 'POST',
       path: `/v1/runs/${runId}/plan-edits`,
