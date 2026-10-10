@@ -160,6 +160,12 @@ describe('host canvas inject helpers', () => {
     expect(canvasDocumentFromProposalDto(dto).plan_check_problems).toEqual([]);
   });
 
+  it('says whether a person edited the plan, defaulting to the orchestrator', () => {
+    expect(canvasDocumentFromProposalDto({ ...dto, plan_origin: 'human_edit' }).plan_origin).toBe('human_edit');
+    expect(canvasDocumentFromProposalDto({ ...dto, plan_origin: 'anything else' }).plan_origin).toBe('orchestrator');
+    expect(canvasDocumentFromProposalDto(dto).plan_origin).toBe('orchestrator');
+  });
+
   it('derives a timeout fallback as a branch edge', () => {
     const steps = [
       { step_id: 'inventory', inputs: ['task.order'], outputs: ['stock'], timeout_secs: 120, on_timeout: ['estimate'] },

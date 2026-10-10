@@ -1127,6 +1127,8 @@ export function graphFromHostCanvas(
             desc: objective,
             matched_label: cases[caseIndex].label,
             otherwise_label: hostOtherwiseLabel(locale),
+            // The output the condition routes on, editable in the panel.
+            ...(caseIndex === 0 && hostStringItems(step.inputs)[0] ? { input: { source: hostStringItems(step.inputs)[0] } } : {}),
           },
           registry,
         });
@@ -1328,6 +1330,7 @@ export function hostUnsavedNodes(graph: PlaygroundGraphState): { id: string; tit
     .filter(
       (node) =>
         !node.data.hostPlanStep &&
+        !(String((node.data.dagNode?.data as JsonObject | undefined)?.type ?? '') in HOST_CONTROL_NODE_KINDS) &&
         node.id !== 'start' &&
         node.id !== 'done' &&
         typeof node.data.hostConditionPart !== 'string' &&
@@ -1348,35 +1351,215 @@ export function hostUnsavedNodesNotice(nodes: readonly { title: string }[], loca
     : `These nodes are not saved: ${names} (they cannot be written into the plan yet)`;
 }
 
-/** Rebuild AgentPlan canvas from editable playground nodes (plan authority). */
+/** The output a condition routes on: its case-0 node's `input.source`, else its step's input. */
+export function hostConditionInput(graph: PlaygroundGraphState, nodeId: string): string {
+  const head = hostConditionChain(graph, nodeId)[0];
+  if (!head) return '';
+  return hostConditionSource(head) ?? hostStringItems((head.data.hostPlanStep as JsonObject | undefined)?.inputs)[0] ?? '';
+}
+
+/** The control-flow editor a canvas node gets in host mode, if any. */
+export function hostStepEditorKind(node: PlaygroundNode): 'condition' | 'approval' | null {
+  const type = String((node.data.dagNode?.data as JsonObject | undefined)?.type ?? '');
+  if (type === 'flow.condition') return 'condition';
+  if (type === 'flow.hook') return 'approval';
+  return null;
+}
+
+/** Every `<step>.<port>` an agent step on the canvas produces. */
+export function hostStepOutputOptions(graph: PlaygroundGraphState): string[] {
+  return graph.nodes.flatMap((node) => {
+    const step = node.data.hostPlanStep as JsonObject | undefined;
+    if (!step || (step.kind ?? 'agent') !== 'agent') return [];
+    return hostStringItems(step.outputs).map((port) => `${node.id}.${port}`);
+  });
+}
+
+/** The canvas nodes of the condition `nodeId` belongs to, case 0 first. */
+export function hostConditionChain(graph: PlaygroundGraphState, nodeId: string): PlaygroundNode[] {
+  const node = graph.nodes.find((item) => item.id === nodeId);
+  if (!node) return [];
+  const owner = typeof node.data.hostConditionPart === 'string' ? node.data.hostConditionPart : node.id;
+  const head = graph.nodes.find((item) => item.id === owner);
+  return [
+    ...(head ? [head] : []),
+    ...graph.nodes
+      .filter((item) => item.data.hostConditionPart === owner)
+      .sort((a, b) => Number(a.id.split('~')[1]) - Number(b.id.split('~')[1])),
+  ];
+}
+
+/** The steps a condition's `otherwise` branch runs: its last case node's `otherwise` wiring. */
+export function hostOtherwiseTargets(graph: PlaygroundGraphState, nodeId: string): string[] {
+  const chain = hostConditionChain(graph, nodeId);
+  const last = chain[chain.length - 1];
+  const chainIds = new Set(chain.map((item) => item.id));
+  return graph.edges
+    .filter((edge) => edge.source === last?.id && edge.sourceHandle === 'otherwise' && !chainIds.has(edge.target))
+    .map((edge) => edge.target);
+}
+
+/** Rewire a condition's `otherwise` branch to exactly `targets` (canvas node ids). */
+export function hostRewireOtherwise(
+  graph: PlaygroundGraphState,
+  nodeId: string,
+  targets: readonly string[],
+  makeEdge: (source: string, sourceHandle: string, target: string) => PlaygroundGraphState['edges'][number],
+): PlaygroundGraphState['edges'] {
+  const chain = hostConditionChain(graph, nodeId);
+  const last = chain[chain.length - 1];
+  if (!last) return graph.edges;
+  const chainIds = new Set(chain.map((item) => item.id));
+  const kept = graph.edges.filter((edge) => !(edge.source === last.id && edge.sourceHandle === 'otherwise' && !chainIds.has(edge.target)));
+  return [...kept, ...targets.filter((target) => target !== last.id).map((target) => makeEdge(last.id, 'otherwise', target))];
+}
+
+/** Set the output a condition routes on (its case-0 node's `input.source`). */
+export function hostWithConditionInput(graph: PlaygroundGraphState, nodeId: string, source: string): PlaygroundGraphState['nodes'] {
+  const head = hostConditionChain(graph, nodeId)[0];
+  return graph.nodes.map((node) => {
+    if (node.id !== head?.id) return node;
+    const data = { ...node.data.dagNode.data } as typeof node.data.dagNode.data;
+    if (source) data.input = { source };
+    else delete data.input;
+    return { ...node, data: { ...node.data, dagNode: { ...node.data.dagNode, data } } };
+  });
+}
+
+/** What an approval gate shows its reviewer: its step's `inputs`, else every output wired into it. */
+export function hostApprovalInputs(graph: PlaygroundGraphState, nodeId: string): string[] {
+  const node = graph.nodes.find((item) => item.id === nodeId);
+  const step = node?.data.hostPlanStep as JsonObject | undefined;
+  if (step) return hostStringItems(step.inputs);
+  const outputs = new Map(
+    graph.nodes.map((item) => [item.id, hostStringItems((item.data.hostPlanStep as JsonObject | undefined)?.outputs)]),
+  );
+  return graph.edges
+    .filter((edge) => edge.target === nodeId && edge.targetHandle === 'in')
+    .flatMap((edge) => (outputs.get(edge.source) ?? []).map((port) => `${edge.source}.${port}`));
+}
+
+/** Set the outputs an approval gate shows; a gate from the library becomes an approval step draft. */
+export function hostWithApprovalInputs(graph: PlaygroundGraphState, nodeId: string, inputs: readonly string[]): PlaygroundGraphState['nodes'] {
+  return graph.nodes.map((node) => {
+    if (node.id !== nodeId) return node;
+    const step = (node.data.hostPlanStep as JsonObject | undefined) ?? { step_id: hostStepIdFor(node.id), kind: 'approval', objective: '' };
+    return { ...node, data: { ...node.data, hostPlanStep: { ...step, inputs: [...inputs] } } };
+  });
+}
+
+/** Plan step kinds a node from the library becomes in host mode. */
+const HOST_CONTROL_NODE_KINDS: Readonly<Record<string, string>> = {
+  'flow.condition': 'condition',
+  'flow.hook': 'approval',
+  'flow.fail': 'fail',
+};
+
+function hostNodeType(node: PlaygroundNode): string {
+  return String((node.data.dagNode?.data as JsonObject | undefined)?.type ?? '');
+}
+
+function hostNodeConfig(node: PlaygroundNode): JsonObject {
+  return (node.data.dagNode?.data ?? {}) as JsonObject;
+}
+
+/** A plan step id for a canvas node id (library nodes are named like `condition_1`). */
+export function hostStepIdFor(nodeId: string): string {
+  const id = nodeId.toLowerCase().replace(/[^a-z0-9._-]+/gu, '-').replace(/^[^a-z0-9]+|[^a-z0-9]+$/gu, '');
+  return id.slice(0, 64) || 'step';
+}
+
+/** The `<step>.<port>` a condition node reads: its `input.source` when set. */
+function hostConditionSource(node: PlaygroundNode): string | null {
+  const input = hostNodeConfig(node).input;
+  const source = isRecord(input) && typeof input.source === 'string' ? input.source.trim() : '';
+  return /^[a-z0-9._-]+\.[a-z0-9_-]+$/u.test(source) ? source : null;
+}
+
+/**
+ * Rebuild the AgentPlan from the canvas (plan authority).  Every node backed
+ * by a plan step is saved, and so is a `flow.condition` / `flow.hook` /
+ * `flow.fail` dragged in from the library (a condition / approval / fail
+ * step).  A condition's branches come from its wiring: case n's label is its
+ * node's `matched_label`, its `then` the targets of that node's `matched`
+ * edges, and `otherwise` the targets of the last case node's `otherwise`
+ * edges.  The host re-derives edges and order from the steps anyway.
+ */
 export function hostCanvasFromGraph(
   canvas: HostCanvasDocument,
   graph: PlaygroundGraphState,
 ): HostCanvasDocument {
   const nodes: HostPlanStepNode[] = [];
-  // Canvas nodes of condition steps (each case's `flow.condition`): their
-  // edges are branches, carried by the condition's own `cases`/`otherwise`,
-  // never ordering dependencies of the targets.
+  const planStepOf = (node: PlaygroundNode) => node.data.hostPlanStep as JsonObject | undefined;
+  const isNewControl = (node: PlaygroundNode) =>
+    !planStepOf(node) && typeof node.data.hostConditionPart !== 'string' && hostNodeType(node) in HOST_CONTROL_NODE_KINDS;
+  // Canvas node id -> plan step id of every node the plan carries.
+  const stepIdOf = new Map<string, string>();
+  for (const node of graph.nodes) {
+    if (planStepOf(node)) stepIdOf.set(node.id, node.id);
+    else if (isNewControl(node)) stepIdOf.set(node.id, hostStepIdFor(node.id));
+  }
+  // Condition nodes (each case's `flow.condition`): their edges are branches,
+  // carried by the condition's own `cases`/`otherwise`, never ordering
+  // dependencies of the targets.
   const conditionNodes = new Set(
     graph.nodes
-      .filter(
-        (node) =>
-          typeof node.data.hostConditionPart === 'string' ||
-          (node.data.hostPlanStep as JsonObject | undefined)?.kind === 'condition',
-      )
+      .filter((node) => typeof node.data.hostConditionPart === 'string' || hostNodeType(node) === 'flow.condition' || planStepOf(node)?.kind === 'condition')
       .map((node) => node.id),
   );
   // An iteration's `iteration-start` child stands for its current item, never a step.
   const iterationParts = new Set(
     graph.nodes.filter((node) => typeof node.data.hostIterationPart === 'string').map((node) => node.id),
   );
+  const outputsOf = new Map<string, string[]>();
   for (const node of graph.nodes) {
-    const planStep = node.data.hostPlanStep;
-    if (!planStep || typeof planStep !== 'object') continue;
-    const step = { ...(planStep as JsonObject) };
+    const step = planStepOf(node);
+    if (step) outputsOf.set(node.id, hostStringItems(step.outputs));
+  }
+  const targetsOf = (nodeId: string, handle: string, exclude: ReadonlySet<string>) =>
+    Array.from(
+      new Set(
+        graph.edges
+          .filter((edge) => edge.source === nodeId && edge.sourceHandle === handle && !exclude.has(edge.target))
+          .map((edge) => stepIdOf.get(edge.target))
+          .filter((id): id is string => Boolean(id)),
+      ),
+    );
+  const upstreamOutputs = (nodeId: string) =>
+    graph.edges
+      .filter((edge) => edge.target === nodeId && edge.targetHandle === 'in')
+      .flatMap((edge) => (outputsOf.get(edge.source) ?? []).map((port) => `${edge.source}.${port}`));
+  for (const node of graph.nodes) {
+    if (typeof node.data.hostConditionPart === 'string') continue;
+    const planStep = planStepOf(node);
+    const fresh = isNewControl(node);
+    if (!planStep && !fresh) continue;
+    const kind = planStep ? String(planStep.kind ?? 'agent') : HOST_CONTROL_NODE_KINDS[hostNodeType(node)];
+    const stepId = stepIdOf.get(node.id) ?? node.id;
+    const step: JsonObject = planStep ? { ...planStep } : { step_id: stepId, kind, objective: '', inputs: [] };
     const objective = objectiveFromNode(node, step.objective);
-    step.step_id = node.id;
+    step.step_id = stepId;
     step.objective = objective;
+    if (kind === 'condition') {
+      const chain = [
+        node,
+        ...graph.nodes
+          .filter((part) => part.data.hostConditionPart === node.id)
+          .sort((a, b) => Number(a.id.split('~')[1]) - Number(b.id.split('~')[1])),
+      ];
+      const chainIds = new Set(chain.map((part) => part.id));
+      const previous = Array.isArray(step.cases) ? (step.cases as JsonObject[]) : [];
+      step.cases = chain.map((part, index) => ({
+        label: String(hostNodeConfig(part).matched_label ?? previous[index]?.label ?? ''),
+        then: targetsOf(part.id, 'matched', chainIds),
+      }));
+      step.otherwise = targetsOf(chain[chain.length - 1].id, 'otherwise', chainIds);
+      const source = hostConditionSource(node) ?? hostStringItems(step.inputs)[0] ?? upstreamOutputs(node.id)[0];
+      step.inputs = source ? [source] : [];
+    } else if (kind === 'approval' && fresh) {
+      // What the reviewer checks: every output of the steps wired into the gate.
+      step.inputs = upstreamOutputs(node.id);
+    }
     // Depends-on comes from the canvas's own edges, not the possibly-stale
     // `hostPlanStep.depends_on` cached on the node -- this is what makes a
     // fan-out/fan-in structure drawn on the canvas (by hand or by Copilot's
@@ -1394,30 +1577,25 @@ export function hostCanvasFromGraph(
     // A step whose on_timeout names this one: that edge is the timeout branch.
     const timeoutOwners = new Set(
       graph.nodes
-        .filter((other) => hostStringItems((other.data.hostPlanStep as JsonObject | undefined)?.on_timeout).includes(node.id))
+        .filter((other) => hostStringItems(planStepOf(other)?.on_timeout).includes(node.id))
         .map((other) => other.id),
     );
     const dependsOn = Array.from(
       new Set(
         graph.edges
-          .filter(
-            (edge) => edge.target === node.id && edge.targetHandle === 'in',
-          )
+          .filter((edge) => edge.target === node.id && edge.targetHandle === 'in')
           .map((edge) => edge.source)
           .filter((source) => source !== 'start' && !conditionNodes.has(source) && !timeoutOwners.has(source) && !iterationParts.has(source))
+          .map((source) => stepIdOf.get(source) ?? source)
           .filter((source) => declared.has(source) || !implied.has(source)),
       ),
     );
     step.depends_on = dependsOn;
-    nodes.push({
-      id: node.id,
-      kind: 'host.plan-step.v1',
-      agent_id: step.agent_id,
-      objective,
-      capabilities: step.capabilities,
-      depends_on: dependsOn,
-      plan_step: step,
-    });
+    nodes.push(
+      kind === 'agent'
+        ? { id: stepId, kind: 'host.plan-step.v1', agent_id: step.agent_id, objective, capabilities: step.capabilities, depends_on: dependsOn, plan_step: step }
+        : { id: stepId, kind: 'host.plan-step.v1', objective, depends_on: dependsOn, plan_step: step },
+    );
   }
   // Keep the plan's own step order (an iteration's body nodes are drawn after
   // every container); steps added on the canvas follow in canvas order.
@@ -1438,20 +1616,25 @@ export function addHostPlanStep(
   const existing = Array.isArray(canvas.plan.steps)
     ? (canvas.plan.steps as JsonObject[])
     : [];
-  const template = existing[0] ?? {
-    agent_id: 'frontend-developer',
-    version: '1.0.0',
-    capabilities: ['read'],
-    depends_on: [],
-  };
-  const stepId = `step-host-${existing.length + 1}`;
+  // Always a plain agent step: copying an arbitrary step would carry a
+  // condition's or gate's `kind` (or a timeout / list output) into it.
+  const agentSteps = existing.filter((step) => (step.kind ?? 'agent') === 'agent');
+  const source = agentSteps[0];
+  const ref = Array.isArray(canvas.plan.agent_refs) ? (canvas.plan.agent_refs as JsonObject[])[0] : undefined;
+  const ids = new Set(existing.map((step) => String(step.step_id ?? '')));
+  let index = existing.length + 1;
+  while (ids.has(`step-host-${index}`)) index += 1;
+  const stepId = `step-host-${index}`;
+  const last = agentSteps[agentSteps.length - 1];
   const step: JsonObject = {
-    ...template,
     step_id: stepId,
+    agent_id: source?.agent_id ?? ref?.agent_id ?? 'frontend-developer',
+    version: source?.version ?? ref?.version ?? '1.0.0',
     objective: locale === 'zh' ? '新步骤' : 'New step',
-    depends_on: existing.length
-      ? [String(existing[existing.length - 1].step_id)]
-      : [],
+    capabilities: hostStringItems(source?.capabilities).length > 0 ? hostStringItems(source?.capabilities) : ['read'],
+    inputs: [],
+    outputs: ['result'],
+    depends_on: last ? [String(last.step_id)] : [],
   };
   const nextCanvas = applyCanvasNodeEdits(canvas, [
     ...canvas.nodes,

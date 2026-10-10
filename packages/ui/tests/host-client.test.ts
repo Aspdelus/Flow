@@ -8,6 +8,7 @@ import {
   parseHostModeSearch,
   sha256Digest,
 } from '../src/integrations/host-client';
+import { canvasDocumentFromProposalDto } from '../src/integrations/host-canvas';
 
 describe('FlowHostClient', () => {
   it('fail-closes without a base URL', () => {
@@ -839,6 +840,36 @@ describe('FlowHostClient', () => {
     const { status, json } = await client.postPlanEdits('run-1', {});
     expect(status).toBe(500);
     expect(json).toEqual({});
+  });
+
+  it('asks for a re-plan through POST /replan with the canvas as a hint, and surfaces a refusal', async () => {
+    const calls: { url: string; body: string }[] = [];
+    const fetchImpl = vi.fn(async (url: string | URL, init?: RequestInit) => {
+      calls.push({ url: String(url), body: String(init?.body ?? '') });
+      return calls.length === 1
+        ? new Response(JSON.stringify({ decision: { status: 'REPLAN_REQUIRED' } }), { status: 200, headers: { 'Content-Type': 'application/json' } })
+        : new Response(JSON.stringify({ decision: { status: 'REJECTED', reason_codes: ['UNKNOWN_AGENT_REF'] } }), { status: 400, headers: { 'Content-Type': 'application/json' } });
+    });
+    const client = new FlowHostClient({ baseUrl: 'http://127.0.0.1:9', fetchImpl: fetchImpl as unknown as typeof fetch });
+    const canvas = canvasDocumentFromProposalDto({
+      schema_version: 'host.flow-http-proposal.v1',
+      run_id: 'run-1',
+      proposal_digest: 'sha256:abc',
+      proposal: {
+        plan: {
+          schema_version: 'host.agent-plan.v2',
+          steps: [{ step_id: 'step-001', agent_id: 'frontend-developer', objective: 'review', capabilities: ['read'], depends_on: [] }],
+          edges: [],
+          execution_order: ['step-001'],
+        },
+      },
+    });
+    const accepted = await client.requestReplan(canvas, 3);
+    expect(accepted).toEqual({ status: 200, json: { decision: { status: 'REPLAN_REQUIRED' } } });
+    expect(calls[0].url).toBe(`http://127.0.0.1:9/v1/runs/${canvas.run_id}/replan`);
+    expect(JSON.parse(calls[0].body)).toMatchObject({ edit_revision: 3, edited_plan: { steps: expect.any(Array) } });
+    const refused = await client.requestReplan(canvas, 4);
+    expect(refused.status).toBe(400);
   });
 
   it('posts a copilot instruction and returns suggested steps', async () => {
