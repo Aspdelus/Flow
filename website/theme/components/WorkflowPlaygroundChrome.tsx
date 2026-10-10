@@ -215,9 +215,11 @@ export function HostPlanNotes({
           style={{
             position: 'absolute',
             top: 'calc(100% + 6px)',
-            right: 0,
+            // The pill sits at the left of the header: open rightwards, never off-screen.
+            left: 0,
             zIndex: 40,
             width: 380,
+            maxWidth: 'calc(100vw - 16px)',
             maxHeight: 360,
             overflowY: 'auto',
             padding: 8,
