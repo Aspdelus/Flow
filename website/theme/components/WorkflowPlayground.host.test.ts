@@ -41,6 +41,7 @@ import { createPlaygroundEdge } from './WorkflowPlayground.model';
 import {
   executionLabel,
   planningLabel,
+  planWarningsLabel,
   shortPlanId,
 } from './WorkflowPlaygroundChrome';
 
@@ -1717,6 +1718,14 @@ describe('WorkflowPlayground host mode: control-flow plan steps', () => {
     expect(done.nodeStatuses.signoff).toBe('success');
     expect(done.openGateStepId).toBeNull();
     expect(done.skippedStepIds).toEqual(['backorder']);
+  });
+});
+
+describe('WorkflowPlayground host mode: plan design warnings', () => {
+  it('labels the warnings pill in both locales', () => {
+    expect(planWarningsLabel(2, 'zh')).toBe('设计提示 2');
+    expect(planWarningsLabel(1, 'en')).toBe('1 design note');
+    expect(planWarningsLabel(3, 'en')).toBe('3 design notes');
   });
 });
 

@@ -145,6 +145,21 @@ describe('host canvas inject helpers', () => {
     ]);
   });
 
+  it('carries the host plan-check warnings for the approver and tolerates hosts without them', () => {
+    const withChecks = canvasDocumentFromProposalDto({
+      ...dto,
+      plan_check: {
+        schema_version: 'host.plan-check.v1',
+        passed: true,
+        problems: [{ severity: 'warning', code: 'RATIONALE_MISSING', step_id: 'step-001', message: 'step step-001 has no rationale' }, 'junk'],
+      },
+    });
+    expect(withChecks.plan_check_problems).toEqual([
+      { severity: 'warning', code: 'RATIONALE_MISSING', step_id: 'step-001', message: 'step step-001 has no rationale' },
+    ]);
+    expect(canvasDocumentFromProposalDto(dto).plan_check_problems).toEqual([]);
+  });
+
   it('derives a timeout fallback as a branch edge', () => {
     const steps = [
       { step_id: 'inventory', inputs: ['task.order'], outputs: ['stock'], timeout_secs: 120, on_timeout: ['estimate'] },

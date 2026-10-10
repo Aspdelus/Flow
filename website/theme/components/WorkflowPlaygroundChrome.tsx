@@ -138,6 +138,12 @@ type PlaygroundHeaderProps = {
    * still planning: elapsed seconds, plus the latest host-derived planning
    * phase frame when the host sends them (`phase`: model/tool/finished). */
   planning?: PlanningStatus;
+  /** Design warnings the host computed for the plan (`host.plan-check.v1`). */
+  planWarnings?: readonly {
+    code: string;
+    step_id: string | null;
+    message: string;
+  }[];
   hostBusy?: boolean;
   onHostSave?: () => void;
   onHostApprove?: () => void;
@@ -149,6 +155,14 @@ type PlaygroundHeaderProps = {
   /** Set only while the run waits on a mid-plan approval gate. */
   onHostReviewGate?: () => void;
 };
+
+/** Header pill for the plan's design warnings (details in its tooltip). */
+export function planWarningsLabel(count: number, locale: 'zh' | 'en'): string {
+  return locale === 'zh'
+    ? `设计提示 ${count}`
+    : `${count} design note${count === 1 ? '' : 's'}`;
+}
+
 /** Short, human-scannable plan id from a `sha256:<hex>` digest. */
 export function shortPlanId(digest: string): string {
   const hex = digest.startsWith('sha256:')
@@ -241,6 +255,7 @@ export function WorkflowPlaygroundHeader({
   onHostAddStep,
   onHostRecover,
   onHostReviewGate,
+  planWarnings = [],
 }: PlaygroundHeaderProps) {
   const menuRef = useDismissibleDetails();
 
@@ -282,6 +297,28 @@ export function WorkflowPlaygroundHeader({
       </div>
 
       <div className="a3s-workflow-header__actions">
+        {hostMode && planWarnings.length > 0 ? (
+          <span
+            data-testid="host-plan-warnings"
+            title={planWarnings
+              .map(
+                (warning) =>
+                  `${warning.step_id ? `${warning.step_id}: ` : ''}${warning.message}`,
+              )
+              .join('\n')}
+            style={{
+              padding: '2px 9px',
+              borderRadius: 999,
+              background: 'var(--workflow-surface-muted)',
+              color: 'var(--workflow-warning, #925a10)',
+              fontSize: 11,
+              fontWeight: 620,
+              whiteSpace: 'nowrap',
+            }}
+          >
+            {planWarningsLabel(planWarnings.length, locale)}
+          </span>
+        ) : null}
         {hostMode && hostFlowStatus ? (
           <span
             data-testid="host-flow-status"
