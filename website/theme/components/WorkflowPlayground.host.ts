@@ -6,10 +6,12 @@ import {
   type HostCanvasDocument,
   type HostComposeProgressFrame,
   type HostGateRequest,
+  type HostPlanProblem,
   type HostPlanStepNode,
   type HostRecoveryFailure,
   type JsonObject,
   applyCanvasNodeEdits,
+  planCheckProblems,
   canvasDocumentFromProposalDto,
   createA3SFlowDagNodeCatalog,
   FlowHostClient,
@@ -1658,10 +1660,103 @@ export function refreshCanvasFromProposalDto(dto: unknown): HostCanvasDocument {
   return canvasDocumentFromProposalDto(dto);
 }
 
+/** A host finding about a suggestion (`refused`, or one of `warnings`). */
+export type HostCopilotNotice = {
+  code: string;
+  steps: string[];
+  message: string;
+};
+
+/** What a save of the suggestion would get (`check`), as the host evaluated it. */
+export type HostCopilotCheck = {
+  valid: boolean;
+  status: string;
+  reasonCodes: string[];
+  message: string | null;
+  designNotes: HostPlanProblem[];
+};
+
 export type HostCopilotReply = {
   message: string;
+  /** Null when the model made no suggestion or the host refused it. */
   suggestedSteps: JsonObject[] | null;
+  /** The host refused the suggestion (e.g. it changed a step's kind). */
+  refused: HostCopilotNotice | null;
+  warnings: HostCopilotNotice[];
+  check: HostCopilotCheck | null;
 };
+
+function copilotNotice(value: unknown): HostCopilotNotice | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const notice = value as JsonObject;
+  return {
+    code: String(notice.code ?? ''),
+    steps: Array.isArray(notice.steps) ? notice.steps.map(String) : [],
+    message: String(notice.message ?? ''),
+  };
+}
+
+function copilotCheck(value: unknown): HostCopilotCheck | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const check = value as JsonObject;
+  return {
+    valid: check.valid === true,
+    status: String(check.status ?? ''),
+    reasonCodes: Array.isArray(check.reason_codes) ? check.reason_codes.map(String) : [],
+    message: typeof check.message === 'string' ? check.message : null,
+    designNotes: planCheckProblems(check.design_notes),
+  };
+}
+
+/**
+ * The announcement for a Copilot reply. A suggestion is applied to the
+ * canvas only when the host neither refused it nor found that a save would
+ * be rejected; design notes never stop it (they are hints, as on Save).
+ */
+export function copilotReplyOutcome(
+  reply: HostCopilotReply,
+  locale: FlowWebsiteLocale,
+): { apply: boolean; announcement: string } {
+  const zh = locale === 'zh';
+  const parts = [reply.message];
+  if (reply.refused) {
+    parts.push(
+      zh
+        ? `建议未应用：它改了步骤 ${reply.refused.steps.join('、')} 的类型。`
+        : `Suggestion not applied: it changed the kind of ${reply.refused.steps.join(', ')}.`,
+    );
+    return { apply: false, announcement: parts.join(' ') };
+  }
+  if (!reply.suggestedSteps || reply.suggestedSteps.length === 0) {
+    return { apply: false, announcement: reply.message };
+  }
+  if (reply.check && !reply.check.valid) {
+    const why = reply.check.message ?? reply.check.reasonCodes.join(', ');
+    parts.push(zh ? `建议无效，未应用：${why}` : `Suggestion invalid, not applied: ${why}`);
+    return { apply: false, announcement: parts.join(' ') };
+  }
+  for (const warning of reply.warnings) {
+    if (warning.code === 'CONTROL_FLOW_REMOVED') {
+      parts.push(
+        zh
+          ? `注意：建议删除了控制流步骤 ${warning.steps.join('、')}。`
+          : `Note: the suggestion removes the control-flow step(s) ${warning.steps.join(', ')}.`,
+      );
+    } else {
+      parts.push(warning.message);
+    }
+  }
+  const notes = reply.check?.designNotes.length ?? 0;
+  if (notes > 0) {
+    parts.push(zh ? `保存后会有 ${notes} 条设计提示。` : `Saving it will show ${notes} design note(s).`);
+  }
+  parts.push(
+    zh
+      ? '已把 AI 助手的建议应用到画布（未保存）。'
+      : "Applied the AI assistant's suggestion to the canvas (unsaved).",
+  );
+  return { apply: true, announcement: parts.join(' ') };
+}
 
 /**
  * `POST /v1/runs/{run_id}/copilot` — the model only ever suggests a plan
@@ -1690,7 +1785,15 @@ export async function postCopilotRequest(
   const suggestedSteps = Array.isArray(json.suggested_steps)
     ? (json.suggested_steps as JsonObject[])
     : null;
-  return { message, suggestedSteps };
+  return {
+    message,
+    suggestedSteps,
+    refused: copilotNotice(json.refused),
+    warnings: Array.isArray(json.warnings)
+      ? json.warnings.map(copilotNotice).filter((notice): notice is HostCopilotNotice => notice !== null)
+      : [],
+    check: copilotCheck(json.check),
+  };
 }
 
 /**
@@ -1704,20 +1807,27 @@ export function applyCopilotSteps(
   locale: FlowWebsiteLocale,
   catalog: A3SFlowDagNodeCatalog,
   suggestedSteps: JsonObject[],
+  check: HostCopilotCheck | null = null,
 ): { canvas: HostCanvasDocument; graph: PlaygroundGraphState } {
   const nodes: HostPlanStepNode[] = suggestedSteps.map((step) => {
-    const stepId = String(step.step_id ?? '');
-    return {
-      id: stepId,
+    const node: HostPlanStepNode = {
+      id: String(step.step_id ?? ''),
       kind: 'host.plan-step.v1',
-      agent_id: step.agent_id,
       objective: step.objective,
-      capabilities: step.capabilities,
       depends_on: Array.isArray(step.depends_on) ? step.depends_on : [],
+      // Keeps `kind` and the control-flow fields (cases, otherwise, ...) as suggested.
       plan_step: step,
     };
+    // Only an agent step binds an agent; a condition / approval / fail never does.
+    if (step.kind === undefined || step.kind === 'agent') {
+      node.agent_id = step.agent_id;
+      node.capabilities = step.capabilities;
+    }
+    return node;
   });
-  const nextCanvas = applyCanvasNodeEdits(canvas, nodes);
+  const edited = applyCanvasNodeEdits(canvas, nodes);
+  // The design notes a save would get, until the save reports its own.
+  const nextCanvas = check ? { ...edited, plan_check_problems: check.designNotes } : edited;
   return {
     canvas: nextCanvas,
     graph: graphFromHostCanvas(nextCanvas, locale, catalog),

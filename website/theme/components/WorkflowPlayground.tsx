@@ -78,6 +78,7 @@ import {
 import {
   addHostPlanStep,
   applyCopilotSteps,
+  copilotReplyOutcome,
   beginNewRun,
   createHostClient,
   graphFromHostCanvas,
@@ -1743,22 +1744,21 @@ function WorkflowPlaygroundSurface({
           hostMode.runId,
           instruction,
         );
-        if (reply.suggestedSteps && reply.suggestedSteps.length > 0) {
+        // The host refuses a suggestion that rewrites a step's kind and says
+        // what a save would do; only one a save would accept is applied.
+        const outcome = copilotReplyOutcome(reply, locale);
+        if (outcome.apply && reply.suggestedSteps) {
           const next = applyCopilotSteps(
             hostCanvas,
             locale,
             catalog,
             reply.suggestedSteps,
+            reply.check,
           );
           setHostCanvas(next.canvas);
           restore(next.graph);
-          const appliedSuffix =
-            locale === 'zh'
-              ? '已把 AI 助手的建议应用到画布（未保存）。'
-              : "Applied the AI assistant's suggestion to the canvas (unsaved).";
-          return `${reply.message} ${appliedSuffix}`;
         }
-        return reply.message;
+        return outcome.announcement;
       } catch (error) {
         return error instanceof Error ? error.message : String(error);
       } finally {

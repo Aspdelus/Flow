@@ -13,6 +13,9 @@ import {
   addHostPlanStep,
   applyCopilotSteps,
   beginNewRun,
+  copilotReplyOutcome,
+  postCopilotRequest,
+  type HostCopilotReply,
   createHostInjectedExample,
   createHostModeCatalog,
   createHostRunPickerExample,
@@ -2027,5 +2030,81 @@ describe('WorkflowPlayground host mode: the control-flow editor helpers', () => 
     const drafted = hostWithApprovalInputs(dragged, 'hook_1', ['inventory.stock']);
     const step = JSON.parse(JSON.stringify((hostCanvasFromGraph(document, { ...dragged, nodes: drafted }).plan.steps as Record<string, unknown>[]).find((s) => s.step_id === 'hook_1')));
     expect(step).toMatchObject({ kind: 'approval', inputs: ['inventory.stock'] });
+  });
+});
+
+describe('WorkflowPlayground host mode: the AI assistant and control flow', () => {
+  const fixture = JSON.parse(
+    readFileSync(fileURLToPath(new URL('../../../../../fixtures/conformance/funnel-conformance.json', import.meta.url)), 'utf8'),
+  ) as { plans: { plan: Record<string, unknown> }[] };
+  const plan = fixture.plans[9].plan;
+  const steps = plan.steps as Record<string, unknown>[];
+  const canvas = () =>
+    canvasDocumentFromProposalDto({
+      schema_version: 'host.flow-http-proposal.v1', run_id: 'run-c', proposal_digest: 'sha256:c', flow_dsl: { kind: 'app' },
+      execution_digest: 'feed', approval_hook_waiting: true, approval_token: 'tok', proposal: { plan },
+    });
+  const reply = (overrides: Partial<HostCopilotReply>): HostCopilotReply => ({
+    message: 'ok', suggestedSteps: steps, refused: null, warnings: [], check: null, ...overrides,
+  });
+  const note = { severity: 'error' as const, code: 'CONDITION_GENERIC_LABEL', step_id: 'route', message: 'catch-all case' };
+
+  it('applies a suggestion kind by kind: control-flow steps keep their fields and bind no agent', () => {
+    const next = applyCopilotSteps(canvas(), 'zh', hostCatalog(), steps);
+    expect(JSON.parse(JSON.stringify(next.canvas.plan.steps))).toEqual(steps);
+    const route = next.canvas.nodes.find((node) => node.id === 'route');
+    expect(route && 'agent_id' in route).toBe(false);
+    expect(route && 'capabilities' in route).toBe(false);
+    const type = (id: string) => next.graph.nodes.find((node) => node.id === id)?.data.dagNode.data.type;
+    expect([type('route'), type('signoff'), type('tax')]).toEqual(['flow.condition', 'flow.hook', 'flow.step']);
+  });
+
+  it('shows the design notes a save of the suggestion would get', () => {
+    const check = { valid: true, status: 'REVALIDATED', reasonCodes: [], message: null, designNotes: [note] };
+    expect(applyCopilotSteps(canvas(), 'zh', hostCatalog(), steps, check).canvas.plan_check_problems).toEqual([note]);
+    expect(applyCopilotSteps(canvas(), 'zh', hostCatalog(), steps).canvas.plan_check_problems).toEqual(canvas().plan_check_problems);
+  });
+
+  it('applies only a suggestion the host neither refused nor found a save would reject', () => {
+    const valid = { valid: true, status: 'REVALIDATED', reasonCodes: [], message: null, designNotes: [note] };
+    const invalid = { valid: false, status: 'REJECTED', reasonCodes: ['UNKNOWN_AGENT_REF'], message: null, designNotes: [] };
+    const refused = { code: 'KIND_CHANGED', steps: ['route'], message: '' };
+    const removed = { code: 'CONTROL_FLOW_REMOVED', steps: ['signoff'], message: '' };
+
+    const kept = copilotReplyOutcome(reply({ check: valid, warnings: [removed] }), 'zh');
+    expect(kept.apply).toBe(true);
+    expect(kept.announcement).toContain('删除了控制流步骤 signoff');
+    expect(kept.announcement).toContain('1 条设计提示');
+    const notApplied = copilotReplyOutcome(reply({ suggestedSteps: null, refused }), 'zh');
+    expect(notApplied).toEqual({ apply: false, announcement: expect.stringContaining('改了步骤 route 的类型') });
+    const rejected = copilotReplyOutcome(reply({ check: invalid }), 'en');
+    expect(rejected).toEqual({ apply: false, announcement: expect.stringContaining('UNKNOWN_AGENT_REF') });
+    expect(copilotReplyOutcome(reply({ suggestedSteps: null }), 'en')).toEqual({ apply: false, announcement: 'ok' });
+  });
+
+  it('reads refused, warnings and check from the host reply', async () => {
+    const client = {
+      postCopilot: vi.fn(async () => ({
+        status: 200,
+        json: {
+          message: 'm', suggested_steps: null,
+          refused: { code: 'KIND_CHANGED', steps: ['route'], message: 'x' },
+          warnings: [{ code: 'CONTROL_FLOW_REMOVED', steps: ['signoff'], message: 'y' }],
+          check: { status: 'REVALIDATED', valid: true, reason_codes: [], design_notes: { problems: [note] } },
+        },
+      })),
+    };
+    const parsed = await postCopilotRequest(client as never, 'run-c', 'change it');
+    expect(parsed.refused).toEqual({ code: 'KIND_CHANGED', steps: ['route'], message: 'x' });
+    expect(parsed.warnings).toEqual([{ code: 'CONTROL_FLOW_REMOVED', steps: ['signoff'], message: 'y' }]);
+    expect(parsed.check).toEqual({ valid: true, status: 'REVALIDATED', reasonCodes: [], message: null, designNotes: [note] });
+    // Anything but an explicit `valid: true` is invalid.
+    client.postCopilot.mockResolvedValueOnce({
+      status: 200,
+      json: { message: 'm', suggested_steps: steps, check: { status: 'REJECTED', reason_codes: ['UNKNOWN_AGENT_REF'] } } as never,
+    });
+    const rejected = await postCopilotRequest(client as never, 'run-c', 'change it');
+    expect(rejected.check?.valid).toBe(false);
+    expect([rejected.refused, rejected.warnings]).toEqual([null, []]);
   });
 });

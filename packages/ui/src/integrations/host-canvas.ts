@@ -38,7 +38,8 @@ export type HostPlanProblem = {
   message: string;
 };
 
-function planCheckProblems(view: unknown): HostPlanProblem[] {
+/** The findings of a `host.plan-check.v1` view (a proposal's `plan_check`, an edit's `design_notes`). */
+export function planCheckProblems(view: unknown): HostPlanProblem[] {
   const problems = isObject(view) && Array.isArray(view.problems) ? view.problems : [];
   return problems.filter(isObject).map((problem) => ({
     severity: problem.severity === 'error' ? 'error' : 'warning',
