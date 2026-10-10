@@ -117,9 +117,14 @@ export type HostRunEditActions = {
   addStep: boolean;
 };
 
-/** Save, Approve, and add-step share one gate: a terminal or cancelling run is closed. */
+/**
+ * Save, Approve, and add-step share one gate: the plan's approval hook is
+ * still waiting on a run that is not terminal. The host refuses every plan
+ * edit once the plan is approved (a run held at a mid-plan gate is
+ * `suspended`, not editable) and while a re-plan is in flight.
+ */
 export function hostRunEditActions(canvas: HostCanvasDocument): HostRunEditActions {
-  const editable = isHostRunEditable(canvas);
+  const editable = isHostRunEditable(canvas) && canvas.approval.hook_waiting === true;
   return { save: editable, approve: editable, addStep: editable };
 }
 

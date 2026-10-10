@@ -11,6 +11,7 @@ import {
   type HostRecoveryFailure,
   type JsonObject,
   applyCanvasNodeEdits,
+  createA3SFlowExpression,
   planCheckProblems,
   canvasDocumentFromProposalDto,
   createA3SFlowDagNodeCatalog,
@@ -1220,6 +1221,15 @@ export function graphFromHostCanvas(
                 ...(caseIndex === 0 && hostStringItems(step.inputs)[0]
                   ? { input: { source: hostStringItems(step.inputs)[0] } }
                   : {}),
+                // What the card's rule line shows: the host matches the routed output to this case's label.
+                ...(hostStringItems(step.inputs)[0]
+                  ? {
+                      expression: hostConditionExpression(
+                        hostStringItems(step.inputs)[0],
+                        cases[caseIndex].label,
+                      ),
+                    }
+                  : {}),
               },
               registry,
             },
@@ -1698,6 +1708,15 @@ function hostNodeConfig(node: PlaygroundNode): JsonObject {
 }
 
 /** A plan step id for a canvas node id (library nodes are named like `condition_1`). */
+/** The card summary of a host condition case: `<routed output> == <label>`. */
+export function hostConditionExpression(source: string, label: string) {
+  return createA3SFlowExpression({
+    op: 'eq',
+    left: { op: 'field', path: source },
+    right: { op: 'literal', value: label },
+  });
+}
+
 export function hostStepIdFor(nodeId: string): string {
   const id = nodeId
     .toLowerCase()

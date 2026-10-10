@@ -14,6 +14,7 @@ import {
   applyCopilotSteps,
   beginNewRun,
   copilotReplyOutcome,
+  hostConditionExpression,
   postCopilotRequest,
   type HostCopilotReply,
   createHostInjectedExample,
@@ -1693,6 +1694,17 @@ describe('WorkflowPlayground host mode: control-flow plan steps', () => {
     expect(
       graph.nodes.find((node) => node.id === 'route~1')?.data.hostPlanStep,
     ).toBeUndefined();
+    // Each case card's rule is what the host matches, not the library default.
+    const rule = (id: string) =>
+      JSON.stringify(
+        graph.nodes.find((node) => node.id === id)?.data.dagNode.data
+          .expression,
+      );
+    expect(rule('route')).toBe(
+      JSON.stringify(hostConditionExpression('inventory.stock', 'in stock')),
+    );
+    expect(rule('route~1')).toContain('Out of stock');
+    expect(rule('route')).not.toContain('input.approved');
   });
 
   it('saves an unedited control-flow plan byte-identical (steps, edges, order)', () => {

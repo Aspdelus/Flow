@@ -333,6 +333,14 @@ describe('host canvas inject helpers', () => {
     }
   });
 
+  it('closes save, approve, and add-step once the plan approval no longer waits', () => {
+    // Approved and held at a mid-plan gate, or mid re-plan: the host refuses edits.
+    for (const flow_status of ['suspended', 'running']) {
+      const canvas = canvasDocumentFromProposalDto({ ...dto, flow_status, approval_hook_waiting: false });
+      expect(hostRunEditActions(canvas)).toEqual({ save: false, approve: false, addStep: false });
+    }
+  });
+
   it('recoveryFailureFromDto parses a valid GET /failure body', () => {
     const failure = recoveryFailureFromDto({
       schema_version: 'host.flow-recovery-request.v1',
