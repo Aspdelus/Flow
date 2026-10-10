@@ -2,6 +2,7 @@ import {
   HostCanvasError,
   advanceHostEditRevision,
   applyCanvasNodeEdits,
+  planEdgesFromSteps,
   canvasDocumentFromProposalDto,
   hostRunEditActions,
   isHostRunEditable,
@@ -106,11 +107,90 @@ describe('host canvas inject helpers', () => {
       plan_step: { step_id: 'step-a', depends_on: ['step-b'] },
     };
     const updated = applyCanvasNodeEdits(canvas, [stepA, stepB]);
-    expect(updated.plan.edges).toEqual([{ from: 'step-b', to: 'step-a' }]);
+    expect(updated.plan.edges).toEqual([
+      { schema_version: 'host.plan-edge.v1', from: 'step-b', to: 'step-a', output: null },
+    ]);
     // The stable order must put step-b before step-a (dependency), not
     // 'step-a' before 'step-b' (alphabetical) -- confirming execution_order
     // was recomputed from the graph, not copied from node iteration order.
     expect(updated.execution_order).toEqual(['step-b', 'step-a']);
+  });
+
+  it('derives edges the way the host does: data, ordering and condition branches', () => {
+    // orchestrator-core PlanGraph::from_steps; fixture plans[9] in
+    // fixtures/conformance/funnel-conformance.json is the same shape.
+    const steps = [
+      { step_id: 'inventory', inputs: ['task.order'], outputs: ['stock'] },
+      {
+        step_id: 'route', kind: 'condition', inputs: ['inventory.stock'],
+        cases: [{ label: 'in stock', then: ['tax'] }, { label: 'Out of stock', then: ['backorder'] }],
+        otherwise: [],
+      },
+      { step_id: 'tax', inputs: ['inventory.stock', 'task.order'], outputs: ['duty'], depends_on: ['route'] },
+      { step_id: 'backorder', inputs: ['task.order'], outputs: ['quote'] },
+      { step_id: 'signoff', kind: 'approval', inputs: ['tax.duty'] },
+      { step_id: 'logistics', inputs: ['tax.duty'], outputs: ['quote'], depends_on: ['signoff'] },
+    ];
+    const edge = (from: string, to: string, output: string | null, branch?: string) => ({
+      schema_version: 'host.plan-edge.v1', from, to, output, ...(branch ? { branch } : {}),
+    });
+    expect(planEdgesFromSteps(steps)).toEqual([
+      edge('inventory', 'route', 'stock'),
+      edge('inventory', 'tax', 'stock'),
+      edge('route', 'backorder', null, 'case:1'),
+      edge('route', 'tax', null, 'case:0'),
+      edge('signoff', 'logistics', null),
+      edge('tax', 'logistics', 'duty'),
+      edge('tax', 'signoff', 'duty'),
+    ]);
+  });
+
+  it('derives a timeout fallback as a branch edge', () => {
+    const steps = [
+      { step_id: 'inventory', inputs: ['task.order'], outputs: ['stock'], timeout_secs: 120, on_timeout: ['estimate'] },
+      { step_id: 'estimate', inputs: ['task.order'], outputs: ['stock'] },
+    ];
+    expect(planEdgesFromSteps(steps)).toEqual([
+      { schema_version: 'host.plan-edge.v1', from: 'inventory', to: 'estimate', output: null, branch: 'timeout' },
+    ]);
+  });
+
+  it('derives an iteration body as branch edges and reads its implicit item / results ports', () => {
+    // fixtures/conformance/funnel-conformance.json plans[17], edges as the host derives them.
+    const steps = [
+      { step_id: 'list', inputs: ['task.order'], outputs: ['orders'], list_output: true },
+      { step_id: 'each', kind: 'iteration', inputs: ['list.orders'], body: ['quote'], collect: 'quote.quote', max_items: 10 },
+      { step_id: 'quote', inputs: ['each.item'], outputs: ['quote'] },
+      { step_id: 'summary', inputs: ['each.results'], outputs: ['summary'] },
+    ];
+    expect(planEdgesFromSteps(steps)).toEqual([
+      { schema_version: 'host.plan-edge.v1', from: 'each', to: 'quote', output: null, branch: 'body' },
+      { schema_version: 'host.plan-edge.v1', from: 'each', to: 'quote', output: 'item' },
+      { schema_version: 'host.plan-edge.v1', from: 'each', to: 'summary', output: 'results' },
+      { schema_version: 'host.plan-edge.v1', from: 'list', to: 'each', output: 'orders' },
+    ]);
+  });
+
+  it('derives a loop body as branch edges and reads its implicit ports', () => {
+    // fixtures/conformance/funnel-conformance.json plans[19], edges as the host derives them.
+    const steps = [
+      { step_id: 'refine', kind: 'loop', inputs: ['task.order'], body: ['draft', 'check'], until: 'check.verdict', pass_label: 'PASS', collect: 'draft.quote', max_rounds: 3 },
+      { step_id: 'draft', inputs: ['task.order', 'refine.previous', 'refine.feedback'], outputs: ['quote'] },
+      { step_id: 'check', inputs: ['draft.quote'], outputs: ['verdict'] },
+      { step_id: 'publish', inputs: ['refine.result', 'refine.status'], outputs: ['notice'] },
+    ];
+    const edge = (from: string, to: string, output: string | null, branch?: string) => ({
+      schema_version: 'host.plan-edge.v1', from, to, output, ...(branch ? { branch } : {}),
+    });
+    expect(planEdgesFromSteps(steps)).toEqual([
+      edge('draft', 'check', 'quote'),
+      edge('refine', 'check', null, 'body'),
+      edge('refine', 'draft', null, 'body'),
+      edge('refine', 'draft', 'feedback'),
+      edge('refine', 'draft', 'previous'),
+      edge('refine', 'publish', 'result'),
+      edge('refine', 'publish', 'status'),
+    ]);
   });
 
   it('rejects a cyclic dependency graph instead of sending an inconsistent plan', () => {

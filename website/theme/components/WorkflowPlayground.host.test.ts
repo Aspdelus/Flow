@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { describe, expect, it, vi } from 'vitest';
 import {
   a3sFlowDagNodeRegistry,
@@ -464,6 +466,180 @@ describe('WorkflowPlayground host mode', () => {
     expect(posD?.x).toBeGreaterThan(posB?.x ?? -Infinity);
   });
 
+  it('graphFromHostCanvas treats input references as dependencies, like the host does', () => {
+    // A real plan (Orchestrator run 1f591a): the planner expressed every
+    // dependency through `inputs` (`<step>.<port>`) and left `depends_on`
+    // empty -- valid AgentPlan, and the host compiles these into DSL edges.
+    // The canvas must show the same chain + final integration step instead
+    // of fanning every step out from start as if they were independent.
+    const catalog = hostCatalog();
+    const step = (step_id: string, inputs: string[]) => ({
+      step_id,
+      agent_id: 'frontend-developer',
+      objective: step_id,
+      capabilities: ['read'],
+      inputs,
+      outputs: [`${step_id}_out`],
+      depends_on: [],
+      version: '1.0.0',
+    });
+    const steps = [
+      step('market', ['task.task_text']),
+      step('persona', ['market.market_out', 'task.task_text']),
+      step('copy', ['market.market_out', 'persona.persona_out']),
+      step('seo', ['copy.copy_out', 'persona.persona_out']),
+      step('integrate', [
+        'copy.copy_out',
+        'market.market_out',
+        'persona.persona_out',
+        'seo.seo_out',
+      ]),
+    ];
+    const dslEdges: [string, string][] = [
+      ['start', 'market'],
+      ['market', 'persona'],
+      ['market', 'copy'],
+      ['persona', 'copy'],
+      ['persona', 'seo'],
+      ['copy', 'seo'],
+      ['market', 'integrate'],
+      ['persona', 'integrate'],
+      ['copy', 'integrate'],
+      ['seo', 'integrate'],
+      ['integrate', 'done'],
+    ];
+    const canvasFor = (withDsl: boolean) =>
+      canvasDocumentFromProposalDto({
+        schema_version: 'host.flow-http-proposal.v1',
+        run_id: 'run-inputs-only',
+        proposal_digest: 'sha256:inputs',
+        execution_digest: 'deadbeef',
+        approval_hook_waiting: true,
+        approval_token: 'tok',
+        proposal: { plan: { schema_version: 'host.agent-plan.v2', steps } },
+        ...(withDsl
+          ? {
+              flow_dsl: {
+                version: '0.7.0',
+                kind: 'app',
+                app: { name: 'host.plan.inputs', mode: 'workflow' },
+                dependencies: [],
+                workflow: {
+                  graph: {
+                    nodes: [
+                      { id: 'start', data: { type: 'flow.start' } },
+                      ...steps.map((s) => ({
+                        id: s.step_id,
+                        data: {
+                          type: HOST_PREVIEW_TYPE,
+                          agent_id: s.agent_id,
+                          objective: s.objective,
+                          version: s.version,
+                        },
+                      })),
+                      { id: 'done', data: { type: 'flow.complete' } },
+                    ],
+                    edges: dslEdges.map(([source, target], index) => ({
+                      id: `e${index + 1}`,
+                      source,
+                      target,
+                    })),
+                  },
+                },
+              },
+            }
+          : {}),
+      });
+    const incoming = (
+      graph: { edges: { source?: string; target?: string }[] },
+      id: string,
+    ) =>
+      graph.edges
+        .filter((edge) => edge.target === id)
+        .map((edge) => edge.source)
+        .sort();
+    // Both paths must agree: with the host DSL (it is kept, not discarded as
+    // "stale"), and with only the AgentPlan (the plan projection fallback).
+    for (const withDsl of [true, false]) {
+      const graph = graphFromHostCanvas(canvasFor(withDsl), 'en', catalog);
+      // With a DSL, its projection is kept -- not discarded as stale because
+      // the plan says the same thing through `inputs` instead of `depends_on`.
+      expect(
+        graph.nodes.find((node) => node.id === 'integrate')?.data
+          .hostPreviewType,
+        `withDsl=${withDsl}`,
+      ).toBe(withDsl ? HOST_PREVIEW_TYPE : undefined);
+      expect(incoming(graph, 'market'), `withDsl=${withDsl}`).toEqual([
+        'start',
+      ]);
+      expect(incoming(graph, 'persona'), `withDsl=${withDsl}`).toEqual([
+        'market',
+      ]);
+      expect(incoming(graph, 'copy'), `withDsl=${withDsl}`).toEqual([
+        'market',
+        'persona',
+      ]);
+      expect(incoming(graph, 'seo'), `withDsl=${withDsl}`).toEqual([
+        'copy',
+        'persona',
+      ]);
+      expect(incoming(graph, 'integrate'), `withDsl=${withDsl}`).toEqual([
+        'copy',
+        'market',
+        'persona',
+        'seo',
+      ]);
+      // Only the integration step is a sink: nothing else reaches `done`.
+      expect(incoming(graph, 'done'), `withDsl=${withDsl}`).toEqual([
+        'integrate',
+      ]);
+    }
+    // Saving the untouched canvas keeps the chain without rewriting the plan:
+    // the data dependencies stay in `inputs` (no extra `depends_on`), the
+    // edges are the host's own data edges and the order is the host's own.
+    const canvas = canvasFor(false);
+    const saved = hostCanvasFromGraph(
+      canvas,
+      graphFromHostCanvas(canvas, 'en', catalog),
+    );
+    expect(saved.execution_order).toEqual([
+      'market',
+      'persona',
+      'copy',
+      'seo',
+      'integrate',
+    ]);
+    const savedSteps = saved.plan.steps as {
+      step_id: string;
+      depends_on: string[];
+    }[];
+    expect(
+      Object.fromEntries(
+        savedSteps.map((s) => [s.step_id, [...s.depends_on].sort()]),
+      ),
+    ).toEqual({
+      market: [],
+      persona: [],
+      copy: [],
+      seo: [],
+      integrate: [],
+    });
+    expect(
+      (saved.plan.edges as { from: string; to: string; output: string | null }[]).map(
+        (edge) => `${edge.from}->${edge.to}:${edge.output}`,
+      ),
+    ).toEqual([
+      'copy->integrate:copy_out',
+      'copy->seo:copy_out',
+      'market->copy:market_out',
+      'market->integrate:market_out',
+      'market->persona:market_out',
+      'persona->copy:persona_out',
+      'persona->integrate:persona_out',
+      'persona->seo:persona_out',
+      'seo->integrate:seo_out',
+    ]);
+  });
   it('hostCanvasFromGraph derives depends_on from the canvas edges, including fan-in, not from stale cached step data', () => {
     const catalog = hostCatalog();
     const canvas = canvasDocumentFromProposalDto({
@@ -1139,6 +1315,7 @@ describe('WorkflowPlayground host mode', () => {
       status: '',
       nodeStatuses: {},
       runningStepIds: [],
+      skippedStepIds: [],
       completedStepCount: 0,
       failedStepCount: 0,
     });
@@ -1399,5 +1576,244 @@ describe('WorkflowPlayground host mode', () => {
     }
     expect(createHostInjectedExample('zh').title).toBe('AI 规划方案');
     expect(createHostRunPickerExample('zh').title).toBe('我的任务');
+  });
+});
+
+describe('WorkflowPlayground host mode: control-flow plan steps', () => {
+  // fixtures/conformance/funnel-conformance.json plans[9]: the Python oracle's
+  // (and, byte for byte, orchestrator-core's) condition + approval plan.
+  const fixture = JSON.parse(
+    readFileSync(
+      fileURLToPath(new URL('../../../../../fixtures/conformance/funnel-conformance.json', import.meta.url)),
+      'utf8',
+    ),
+  ) as { plans: { plan: Record<string, unknown> }[] };
+  const plan = fixture.plans[9].plan;
+  const canvas = () =>
+    canvasDocumentFromProposalDto({
+      schema_version: 'host.flow-http-proposal.v1',
+      run_id: 'run-cf',
+      proposal_digest: 'sha256:cf',
+      flow_dsl: { kind: 'app' },
+      execution_digest: 'feed',
+      approval_hook_waiting: true,
+      approval_token: 'tok',
+      proposal: { plan },
+    });
+
+  it('draws a condition as one flow.condition per case and an approval as a flow.hook', () => {
+    const graph = graphFromHostCanvas(canvas(), 'zh', hostCatalog());
+    const type = (id: string) => graph.nodes.find((node) => node.id === id)?.data.dagNode.data.type;
+    expect([type('route'), type('route~1'), type('signoff'), type('tax')]).toEqual([
+      'flow.condition', 'flow.condition', 'flow.hook', 'flow.step',
+    ]);
+    const edge = (source: string, target: string) =>
+      graph.edges.find((item) => item.source === source && item.target === target);
+    expect(edge('route', 'tax')?.sourceHandle).toBe('matched');
+    expect(edge('route', 'route~1')?.sourceHandle).toBe('otherwise');
+    expect(edge('route~1', 'backorder')?.sourceHandle).toBe('matched');
+    expect(edge('route', 'tax')?.data?.sourcePortLabel ?? edge('route', 'tax')?.label).toBe('in stock');
+    // The gate sits between the duty and the quote it holds back.
+    expect(edge('tax', 'signoff')).toBeDefined();
+    expect(edge('signoff', 'logistics')?.sourceHandle).toBe('received');
+    // Only the first case node carries the plan step.
+    expect(graph.nodes.find((node) => node.id === 'route~1')?.data.hostPlanStep).toBeUndefined();
+  });
+
+  it('saves an unedited control-flow plan byte-identical (steps, edges, order)', () => {
+    const document = canvas();
+    const graph = graphFromHostCanvas(document, 'zh', hostCatalog());
+    const saved = hostCanvasFromGraph(document, graph);
+    expect(JSON.parse(JSON.stringify(saved.plan.steps))).toEqual(plan.steps);
+    expect(saved.plan.edges).toEqual(plan.edges);
+    expect(saved.plan.execution_order).toEqual(plan.execution_order);
+  });
+});
+
+describe('WorkflowPlayground host mode: fail steps', () => {
+  const fixture = JSON.parse(
+    readFileSync(
+      fileURLToPath(new URL('../../../../../fixtures/conformance/funnel-conformance.json', import.meta.url)),
+      'utf8',
+    ),
+  ) as { plans: { plan: Record<string, unknown> }[] };
+  const plan = fixture.plans[14].plan;
+  const canvas = () =>
+    canvasDocumentFromProposalDto({
+      schema_version: 'host.flow-http-proposal.v1', run_id: 'run-fail', proposal_digest: 'sha256:f', flow_dsl: { kind: 'app' },
+      execution_digest: 'feed', approval_hook_waiting: true, approval_token: 'tok', proposal: { plan },
+    });
+
+  it('draws a fail step as flow.fail on its branch and saves the plan unchanged', () => {
+    const document = canvas();
+    const graph = graphFromHostCanvas(document, 'zh', hostCatalog());
+    expect(graph.nodes.find((node) => node.id === 'stop')?.data.dagNode.data.type).toBe('flow.fail');
+    expect(graph.edges.find((edge) => edge.source === 'route' && edge.target === 'stop')?.sourceHandle).toBe('matched');
+    const saved = hostCanvasFromGraph(document, graph);
+    expect(JSON.parse(JSON.stringify(saved.plan.steps))).toEqual(plan.steps);
+    expect(saved.plan.edges).toEqual(plan.edges);
+  });
+
+  it('marks the fail step that ended the run', () => {
+    const execution = hostRunExecutionFromSnapshot({
+      status: 'failed',
+      error: 'FAILED_BY_PLAN stop: 缺货，无法履约 (inputs: inventory.stock=out of stock)',
+      steps: { 'agent:inventory': { status: 'completed' }, 'cond:route': { status: 'completed' } },
+    });
+    expect(execution.nodeStatuses.stop).toBe('error');
+    expect(hostRunExecutionFromSnapshot({ status: 'failed', error: 'INVALID_INPUT: boom', steps: {} }).nodeStatuses.stop).toBeUndefined();
+  });
+});
+
+describe('WorkflowPlayground host mode: step timeouts', () => {
+  const fixture = JSON.parse(
+    readFileSync(fileURLToPath(new URL('../../../../../fixtures/conformance/funnel-conformance.json', import.meta.url)), 'utf8'),
+  ) as { plans: { plan: Record<string, unknown> }[] };
+  const plan = fixture.plans[15].plan;
+  const canvas = () =>
+    canvasDocumentFromProposalDto({
+      schema_version: 'host.flow-http-proposal.v1', run_id: 'run-timeout', proposal_digest: 'sha256:t', flow_dsl: { kind: 'app' },
+      execution_digest: 'feed', approval_hook_waiting: true, approval_token: 'tok', proposal: { plan },
+    });
+
+  it('draws the timeout fallback on a labelled edge and saves the plan unchanged', () => {
+    const document = canvas();
+    const graph = graphFromHostCanvas(document, 'zh', hostCatalog());
+    const fallback = graph.edges.find((edge) => edge.source === 'inventory' && edge.target === 'estimate');
+    expect(fallback?.data?.labelOverride ?? fallback?.label).toBe('超时');
+    const saved = hostCanvasFromGraph(document, graph);
+    expect(JSON.parse(JSON.stringify(saved.plan.steps))).toEqual(plan.steps);
+    expect(saved.plan.edges).toEqual(plan.edges);
+  });
+
+  it('shows a step that timed out as failed even though Flow completed it', () => {
+    const execution = hostRunExecutionFromSnapshot({
+      status: 'completed',
+      steps: { 'agent:inventory': { status: 'completed', output: { status: 'timed_out' } }, 'agent:estimate': { status: 'completed', output: {} } },
+    });
+    expect(execution.nodeStatuses).toMatchObject({ inventory: 'error', estimate: 'success' });
+  });
+});
+
+describe('WorkflowPlayground host mode: iterations', () => {
+  const fixture = JSON.parse(
+    readFileSync(fileURLToPath(new URL('../../../../../fixtures/conformance/funnel-conformance.json', import.meta.url)), 'utf8'),
+  ) as { plans: { plan: Record<string, unknown> }[] };
+  // list (list_output) -> each { quote } -> summary (reads each.results)
+  const plan = fixture.plans[17].plan;
+  const canvas = () =>
+    canvasDocumentFromProposalDto({
+      schema_version: 'host.flow-http-proposal.v1', run_id: 'run-iter', proposal_digest: 'sha256:i', flow_dsl: { kind: 'app' },
+      execution_digest: 'feed', approval_hook_waiting: true, approval_token: 'tok', proposal: { plan },
+    });
+
+  it('draws an iteration as a container holding its body after the current item', () => {
+    const graph = graphFromHostCanvas(canvas(), 'zh', hostCatalog());
+    const node = (id: string) => graph.nodes.find((item) => item.id === id);
+    expect(node('each')?.data.dagNode.data.type).toBe('iteration');
+    expect(node('each')?.data.dagNode.data.title).toBe('逐项处理（最多 10 项）');
+    expect(node('each~item')?.data.dagNode.data.type).toBe('iteration-start');
+    expect([node('each~item')?.parentId, node('quote')?.parentId, node('summary')?.parentId]).toEqual(['each', 'each', undefined]);
+    const index = (id: string) => graph.nodes.findIndex((item) => item.id === id);
+    expect(index('each')).toBeLessThan(index('quote'));
+    const edge = (source: string, target: string) => graph.edges.find((item) => item.source === source && item.target === target);
+    expect(edge('each~item', 'quote')).toBeDefined();
+    expect(edge('list', 'each')).toBeDefined();
+    expect(edge('each', 'summary')?.sourceHandle).toBe('done');
+    expect(edge('each', 'quote')).toBeUndefined();
+    expect(graph.edges.some((item) => item.source === 'quote' && item.target === 'done')).toBe(false);
+  });
+
+  it('saves an unedited iteration plan byte-identical', () => {
+    const document = canvas();
+    const saved = hostCanvasFromGraph(document, graphFromHostCanvas(document, 'zh', hostCatalog()));
+    expect(JSON.parse(JSON.stringify(saved.plan.steps))).toEqual(plan.steps);
+    expect(saved.plan.edges).toEqual(plan.edges);
+    expect(saved.plan.execution_order).toEqual(plan.execution_order);
+  });
+
+  it('reads every item of a body step as one node and the container from its host steps', () => {
+    const running = hostRunExecutionFromSnapshot({
+      status: 'running',
+      steps: {
+        'agent:list': { status: 'completed' },
+        'iter:each': { status: 'completed' },
+        'agent:quote@0': { status: 'completed' },
+        'agent:quote@1': { status: 'running' },
+      },
+    });
+    expect(running.nodeStatuses).toMatchObject({ list: 'success', each: 'running', 'each~item': 'success', quote: 'running' });
+    expect(running.nodeStatuses['quote@0']).toBeUndefined();
+    expect(running.runningStepIds).toEqual(['quote']);
+    const done = hostRunExecutionFromSnapshot({
+      status: 'completed',
+      steps: {
+        'iter:each': { status: 'completed' },
+        'agent:quote@0': { status: 'completed' },
+        'agent:quote@1': { status: 'failed' },
+        'iter:each.results': { status: 'completed' },
+      },
+    });
+    expect(done.nodeStatuses).toMatchObject({ each: 'success', quote: 'error' });
+    expect([done.completedStepCount, done.failedStepCount]).toEqual([1, 1]);
+  });
+});
+
+describe('WorkflowPlayground host mode: loops', () => {
+  const fixture = JSON.parse(
+    readFileSync(fileURLToPath(new URL('../../../../../fixtures/conformance/funnel-conformance.json', import.meta.url)), 'utf8'),
+  ) as { plans: { plan: Record<string, unknown> }[] };
+  // refine { draft -> check } (until check.verdict == PASS, 3 rounds) -> publish
+  const plan = fixture.plans[19].plan;
+  const canvas = () =>
+    canvasDocumentFromProposalDto({
+      schema_version: 'host.flow-http-proposal.v1', run_id: 'run-loop', proposal_digest: 'sha256:l', flow_dsl: { kind: 'app' },
+      execution_digest: 'feed', approval_hook_waiting: true, approval_token: 'tok', proposal: { plan },
+    });
+
+  it('draws a loop as a container holding its body after this round\'s inputs', () => {
+    const graph = graphFromHostCanvas(canvas(), 'zh', hostCatalog());
+    const node = (id: string) => graph.nodes.find((item) => item.id === id);
+    expect(node('refine')?.data.dagNode.data.type).toBe('loop');
+    expect(node('refine')?.data.dagNode.data.title).toBe('反复修改直到通过（最多 3 轮）');
+    expect(node('refine')?.data.dagNode.data.max_iterations).toBe(3);
+    expect(node('refine~round')?.data.dagNode.data.type).toBe('loop-start');
+    expect([node('refine~round')?.parentId, node('draft')?.parentId, node('check')?.parentId, node('publish')?.parentId]).toEqual([
+      'refine', 'refine', 'refine', undefined,
+    ]);
+    const edge = (source: string, target: string) => graph.edges.find((item) => item.source === source && item.target === target);
+    expect(edge('refine~round', 'draft')).toBeDefined();
+    expect(edge('draft', 'check')).toBeDefined();
+    expect(edge('refine~round', 'check')).toBeUndefined();
+    expect(edge('refine', 'publish')?.sourceHandle).toBe('done');
+  });
+
+  it('saves an unedited loop plan byte-identical', () => {
+    const document = canvas();
+    const saved = hostCanvasFromGraph(document, graphFromHostCanvas(document, 'zh', hostCatalog()));
+    expect(JSON.parse(JSON.stringify(saved.plan.steps))).toEqual(plan.steps);
+    expect(saved.plan.edges).toEqual(plan.edges);
+    expect(saved.plan.execution_order).toEqual(plan.execution_order);
+  });
+
+  it('reads every round of a body step as one node and the container from its rounds', () => {
+    const revising = hostRunExecutionFromSnapshot({
+      status: 'running',
+      steps: {
+        'agent:draft#0': { status: 'completed' },
+        'agent:check#0': { status: 'completed' },
+        'loop:refine@0': { status: 'completed' },
+        'agent:draft#1': { status: 'running' },
+      },
+    });
+    expect(revising.nodeStatuses).toMatchObject({ refine: 'running', 'refine~round': 'running', draft: 'running', check: 'success' });
+    expect(revising.nodeStatuses['draft#1']).toBeUndefined();
+    const done = hostRunExecutionFromSnapshot({
+      status: 'completed',
+      steps: { 'loop:refine@0': { status: 'completed' }, 'loop:refine@1': { status: 'completed' }, 'loop:refine': { status: 'completed' } },
+    });
+    expect(done.nodeStatuses.refine).toBe('success');
+    const broken = hostRunExecutionFromSnapshot({ status: 'failed', steps: { 'loop:refine@0': { status: 'failed' } } });
+    expect(broken.nodeStatuses.refine).toBe('error');
   });
 });
