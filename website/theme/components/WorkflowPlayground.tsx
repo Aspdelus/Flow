@@ -82,6 +82,8 @@ import {
   createHostClient,
   graphFromHostCanvas,
   hostCanvasFromGraph,
+  hostUnsavedNodes,
+  hostUnsavedNodesNotice,
   isHostRunExecutionActive,
   isProposalNotYetReady,
   isProposalRefused,
@@ -1385,6 +1387,8 @@ function WorkflowPlaygroundSurface({
     }
     const client = createHostClient(hostMode);
     const nextCanvas = hostCanvasFromGraph(hostCanvas, graph);
+    // Nodes the plan cannot carry are named, never dropped silently.
+    const unsavedNotice = hostUnsavedNodesNotice(hostUnsavedNodes(graph), locale);
     return client.saveCanvas(nextCanvas, editRevision).then((result) => {
       const decision = (result.json.decision ?? {}) as {
         status?: string;
@@ -1409,7 +1413,7 @@ function WorkflowPlaygroundSurface({
       setAnnouncement(
         `${decision.status ?? result.status}${
           decision.message ? `: ${decision.message}` : ''
-        }`,
+        }${unsavedNotice ? ` · ${unsavedNotice}` : ''}`,
       );
       return savedCanvas;
     });

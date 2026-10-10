@@ -1316,6 +1316,38 @@ function objectiveFromNode(node: PlaygroundNode, fallback: unknown): unknown {
   return fallback;
 }
 
+/**
+ * Canvas nodes the save cannot carry into the plan: anything without a plan
+ * step behind it (e.g. a node dragged in from the library) other than the
+ * structural ones host mode draws itself -- start / done, the extra case
+ * nodes of a condition chain and the start child of an iteration / loop.
+ * Saving must say so instead of dropping them silently.
+ */
+export function hostUnsavedNodes(graph: PlaygroundGraphState): { id: string; title: string }[] {
+  return graph.nodes
+    .filter(
+      (node) =>
+        !node.data.hostPlanStep &&
+        node.id !== 'start' &&
+        node.id !== 'done' &&
+        typeof node.data.hostConditionPart !== 'string' &&
+        typeof node.data.hostIterationPart !== 'string',
+    )
+    .map((node) => {
+      const data = node.data.dagNode?.data as JsonObject | undefined;
+      const title = typeof data?.title === 'string' && data.title.trim() ? data.title : node.id;
+      return { id: node.id, title };
+    });
+}
+
+export function hostUnsavedNodesNotice(nodes: readonly { title: string }[], locale: FlowWebsiteLocale): string {
+  if (nodes.length === 0) return '';
+  const names = nodes.map((node) => node.title).join(locale === 'zh' ? '、' : ', ');
+  return locale === 'zh'
+    ? `以下节点不会被保存：${names}（暂不支持把它们写进方案）`
+    : `These nodes are not saved: ${names} (they cannot be written into the plan yet)`;
+}
+
 /** Rebuild AgentPlan canvas from editable playground nodes (plan authority). */
 export function hostCanvasFromGraph(
   canvas: HostCanvasDocument,

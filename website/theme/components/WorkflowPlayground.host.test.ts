@@ -18,6 +18,8 @@ import {
   graphFromHostCanvas,
   hostCanvasFromGraph,
   hostRunExecutionFromSnapshot,
+  hostUnsavedNodes,
+  hostUnsavedNodesNotice,
   isHostRunExecutionActive,
   isProposalNotYetReady,
   isProposalRefused,
@@ -37,7 +39,7 @@ import {
   withHostModeParams,
 } from './WorkflowPlayground.host';
 import { createPlaygroundNodeCatalog } from './WorkflowPlayground.custom-nodes';
-import { createPlaygroundEdge } from './WorkflowPlayground.model';
+import { createPlaygroundEdge, createPlaygroundNode } from './WorkflowPlayground.model';
 import {
   executionLabel,
   planningLabel,
@@ -1849,5 +1851,28 @@ describe('WorkflowPlayground host mode: loops', () => {
     expect(done.nodeStatuses.refine).toBe('success');
     const broken = hostRunExecutionFromSnapshot({ status: 'failed', steps: { 'loop:refine@0': { status: 'failed' } } });
     expect(broken.nodeStatuses.refine).toBe('error');
+  });
+});
+
+describe('WorkflowPlayground host mode: nodes a save cannot carry', () => {
+  const fixture = JSON.parse(
+    readFileSync(fileURLToPath(new URL('../../../../../fixtures/conformance/funnel-conformance.json', import.meta.url)), 'utf8'),
+  ) as { plans: { plan: Record<string, unknown> }[] };
+  const canvasOf = (plan: Record<string, unknown>) =>
+    canvasDocumentFromProposalDto({
+      schema_version: 'host.flow-http-proposal.v1', run_id: 'run-u', proposal_digest: 'sha256:u', flow_dsl: { kind: 'app' },
+      execution_digest: 'feed', approval_hook_waiting: true, approval_token: 'tok', proposal: { plan },
+    });
+
+  it('names a node dragged in from the library but not the ones host mode draws itself', () => {
+    // condition chain (route~1) and an iteration container's start child are structural.
+    for (const index of [9, 17]) {
+      expect(hostUnsavedNodes(graphFromHostCanvas(canvasOf(fixture.plans[index].plan), 'zh', hostCatalog()))).toEqual([]);
+    }
+    const graph = graphFromHostCanvas(canvasOf(fixture.plans[9].plan), 'zh', hostCatalog());
+    const dragged = createPlaygroundNode('wait-1', 'flow.wait', { x: 0, y: 0 }, 'zh', { configuration: { title: '等一等' } });
+    expect(hostUnsavedNodes({ ...graph, nodes: [...graph.nodes, dragged] })).toEqual([{ id: 'wait-1', title: '等一等' }]);
+    expect(hostUnsavedNodesNotice([{ title: '等一等' }, { title: 'B' }], 'zh')).toBe('以下节点不会被保存：等一等、B（暂不支持把它们写进方案）');
+    expect(hostUnsavedNodesNotice([], 'en')).toBe('');
   });
 });
