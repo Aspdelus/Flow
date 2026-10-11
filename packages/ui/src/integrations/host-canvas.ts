@@ -79,6 +79,8 @@ export type HostCanvasDocument = {
    * only warnings reach a verified proposal. Empty when the host predates
    * plan checks or the plan is an edited overlay. */
   plan_check_problems: HostPlanProblem[];
+  /** The last edit_revision the host recorded for this run (0: none). */
+  last_edit_revision: number;
   /** `human_edit` once a person saved an edit of this plan (the proposal's own
    * `edit_origin`); the approver then reviews the edited version. */
   plan_origin: 'orchestrator' | 'human_edit';
@@ -221,6 +223,55 @@ export function readHostEditRevision(
   return Number.isFinite(parsed) && parsed >= 1 ? parsed : 1;
 }
 
+/**
+ * The revision the next save uses: at least `candidate`, and past every
+ * revision the host recorded (another tab, another origin, or a client that
+ * lost its stored count would otherwise reuse one).
+ */
+export function nextHostEditRevision(
+  candidate: number,
+  canvas: Pick<HostCanvasDocument, 'last_edit_revision'> | null,
+): number {
+  const base = Number.isFinite(candidate) && candidate >= 1 ? Math.floor(candidate) : 1;
+  return Math.max(base, (canvas?.last_edit_revision ?? 0) + 1);
+}
+
+/** Store `revision` as the one `runId`'s next save uses. */
+export function rememberHostEditRevision(
+  store: HostEditRevisionStore,
+  runId: string,
+  revision: number,
+): number {
+  if (runId) store.setItem(hostEditRevisionStorageKey(runId), String(revision));
+  return revision;
+}
+
+/** How a `POST /plan-edits` answer lands. */
+export type HostSaveOutcome = {
+  /** The host saved it (or found nothing to change, or re-plans from it). */
+  saved: boolean;
+  /** The host evaluated and recorded it under its revision, saved or not. */
+  recorded: boolean;
+  message: string;
+};
+
+const SAVED_EDIT_STATUSES = new Set(['REVALIDATED', 'UNCHANGED', 'REPLAN_REQUIRED']);
+
+export function hostSaveOutcome(result: { status: number; json: JsonObject }): HostSaveOutcome {
+  const decision = isObject(result.json.decision) ? result.json.decision : undefined;
+  const status = typeof decision?.status === 'string' ? decision.status : undefined;
+  const detail = typeof decision?.message === 'string' && decision.message ? `: ${decision.message}` : '';
+  return {
+    saved: result.status >= 200 && result.status < 300 && status !== undefined && SAVED_EDIT_STATUSES.has(status),
+    recorded: status !== undefined,
+    message: status
+      ? `${status}${detail}`
+      : typeof result.json.error === 'string'
+        ? result.json.error
+        : `host returned HTTP ${result.status}`,
+  };
+}
+
 /** Persist the next revision. The stored value is strictly greater than `current`. */
 export function advanceHostEditRevision(
   store: HostEditRevisionStore,
@@ -295,6 +346,10 @@ export function canvasDocumentFromProposalDto(
     },
     plan_check_problems: planCheckProblems(dto.plan_check),
     plan_origin: dto.plan_origin === 'human_edit' ? 'human_edit' : 'orchestrator',
+    last_edit_revision:
+      typeof dto.last_edit_revision === 'number' && dto.last_edit_revision >= 0
+        ? Math.floor(dto.last_edit_revision)
+        : 0,
     save: {
       method: 'POST',
       path: `/v1/runs/${runId}/plan-edits`,

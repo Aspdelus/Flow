@@ -1,10 +1,13 @@
 import { CheckCircle } from '@phosphor-icons/react';
 import {
   advanceHostEditRevision,
+  hostSaveOutcome,
+  nextHostEditRevision,
   hostRunEditActions,
   issueApprovalRecord,
   localizeA3SFlowDagManifest,
   readHostEditRevision,
+  rememberHostEditRevision,
   refuseUninjectedPlayground,
   type A3SFlowCustomDagNodeRegistration,
   type A3SFlowWorkflowDagNode,
@@ -368,14 +371,18 @@ function WorkflowPlaygroundSurface({
           setHostCanvas(canvas);
           lastSavedPlanStepsRef.current = JSON.stringify(canvas.plan.steps);
           restore(graphFromHostCanvas(canvas, locale, catalog));
-          // A reload re-reads the stored revision. Resetting to 1 here would
-          // replay the host's cached same-revision response.
+          // Continue past every revision the host recorded: this tab's stored
+          // count can be behind (another tab or origin saved this run), and the
+          // host refuses a used revision with a different plan.
           if (hostMode.runId && typeof sessionStorage !== 'undefined') {
             setEditRevision(
-              readHostEditRevision(sessionStorage, hostMode.runId),
+              nextHostEditRevision(
+                readHostEditRevision(sessionStorage, hostMode.runId),
+                canvas,
+              ),
             );
           } else {
-            setEditRevision(1);
+            setEditRevision(nextHostEditRevision(1, canvas));
           }
           setAnnouncement(
             locale === 'zh'
@@ -1401,32 +1408,41 @@ function WorkflowPlaygroundSurface({
       hostUnsavedNodes(graph),
       locale,
     );
-    return client.saveCanvas(nextCanvas, editRevision).then((result) => {
-      const decision = (result.json.decision ?? {}) as {
-        status?: string;
-        message?: string;
-      };
+    return client.saveCanvas(nextCanvas, editRevision).then(async (result) => {
+      const outcome = hostSaveOutcome(result);
       const proposal = result.json.proposal;
-      let savedCanvas = nextCanvas;
-      if (proposal && typeof proposal === 'object') {
-        savedCanvas = refreshCanvasFromProposalDto(proposal);
-        setHostCanvas(savedCanvas);
-        restore(graphFromHostCanvas(savedCanvas, locale, catalog));
-      } else {
-        setHostCanvas(nextCanvas);
-      }
-      lastSavedPlanStepsRef.current = JSON.stringify(savedCanvas.plan.steps);
+      const refreshed =
+        proposal && typeof proposal === 'object'
+          ? refreshCanvasFromProposalDto(proposal)
+          : null;
+      // The next save's revision: past this one if the host recorded it, and
+      // past every revision the host has (an error answer carries none, so
+      // ask for the run's proposal).
+      const latest =
+        refreshed ??
+        (await client.openCanvas(hostMode.runId).catch(() => null));
       setEditRevision((current) => {
-        if (!hostMode?.runId || typeof sessionStorage === 'undefined') {
-          return current >= 1 ? Math.floor(current) + 1 : 1;
-        }
-        return advanceHostEditRevision(sessionStorage, hostMode.runId, current);
+        const next = nextHostEditRevision(
+          outcome.recorded ? current + 1 : current,
+          latest,
+        );
+        return hostMode.runId && typeof sessionStorage !== 'undefined'
+          ? rememberHostEditRevision(sessionStorage, hostMode.runId, next)
+          : next;
       });
-      setAnnouncement(
-        `${decision.status ?? result.status}${
-          decision.message ? `: ${decision.message}` : ''
-        }${unsavedNotice ? ` · ${unsavedNotice}` : ''}`,
-      );
+      const announcement = `${outcome.message}${
+        unsavedNotice ? ` · ${unsavedNotice}` : ''
+      }`;
+      if (!outcome.saved) {
+        // Keep the operator's canvas: they fix the step the reason names and
+        // save again.  Never fall through to Approve with the old plan.
+        throw new Error(announcement);
+      }
+      const savedCanvas = refreshed ?? nextCanvas;
+      setHostCanvas(savedCanvas);
+      if (refreshed) restore(graphFromHostCanvas(refreshed, locale, catalog));
+      lastSavedPlanStepsRef.current = JSON.stringify(savedCanvas.plan.steps);
+      setAnnouncement(announcement);
       return savedCanvas;
     });
   }, [catalog, editRevision, graph, hostCanvas, hostMode, locale, restore]);

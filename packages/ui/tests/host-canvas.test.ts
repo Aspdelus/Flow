@@ -7,9 +7,12 @@ import {
   hostRunEditActions,
   isHostRunEditable,
   planEditBodyFromCanvas,
+  hostSaveOutcome,
+  nextHostEditRevision,
   readHostEditRevision,
   recoveryFailureFromDto,
   refuseUninjectedPlayground,
+  rememberHostEditRevision,
 } from '../src/integrations/host-canvas';
 
 describe('host canvas inject helpers', () => {
@@ -412,5 +415,39 @@ describe('host canvas inject helpers', () => {
     const savedAgain = advanceHostEditRevision(store, runId, reloaded);
     expect(savedAgain).toBeGreaterThan(reloaded);
     expect(readHostEditRevision(store, 'run-2')).toBe(1);
+  });
+});
+
+describe('host edit revisions and save outcomes', () => {
+  const dto = {
+    schema_version: 'host.flow-http-proposal.v1',
+    run_id: 'run-1',
+    proposal_digest: 'sha256:abc',
+    proposal: { plan: { schema_version: 'host.agent-plan.v2', steps: [], edges: [], execution_order: [] } },
+  };
+  it('saves past every revision the host recorded', () => {
+    const canvas = (last: unknown) => canvasDocumentFromProposalDto({ ...dto, last_edit_revision: last });
+    expect(canvas(4).last_edit_revision).toBe(4);
+    expect([canvas(undefined), canvas(-1), canvas('3')].map((item) => item.last_edit_revision)).toEqual([0, 0, 0]);
+    // A fresh tab (stored 1) continues after the host's 4; a higher local count wins.
+    expect(nextHostEditRevision(1, canvas(4))).toBe(5);
+    expect(nextHostEditRevision(7, canvas(4))).toBe(7);
+    expect(nextHostEditRevision(0, null)).toBe(1);
+    const store = new Map<string, string>();
+    const memory = { getItem: (key: string) => store.get(key) ?? null, setItem: (key: string, value: string) => void store.set(key, value) };
+    rememberHostEditRevision(memory, 'run-1', 5);
+    expect(readHostEditRevision(memory, 'run-1')).toBe(5);
+  });
+
+  it('tells a saved edit from a refused one and from an error', () => {
+    const saved = hostSaveOutcome({ status: 200, json: { decision: { status: 'REVALIDATED' } } });
+    expect(saved).toEqual({ saved: true, recorded: true, message: 'REVALIDATED' });
+    const refused = hostSaveOutcome({ status: 400, json: { decision: { status: 'REJECTED', message: 'step b: unknown agent' } } });
+    expect(refused).toEqual({ saved: false, recorded: true, message: 'REJECTED: step b: unknown agent' });
+    // A 2xx that is not a save status is not saved either.
+    expect(hostSaveOutcome({ status: 200, json: { decision: { status: 'STALE' } } }).saved).toBe(false);
+    const conflict = hostSaveOutcome({ status: 409, json: { error: 'CONFLICT: edit_revision 2 was already saved with a different plan' } });
+    expect(conflict).toEqual({ saved: false, recorded: false, message: 'CONFLICT: edit_revision 2 was already saved with a different plan' });
+    expect(hostSaveOutcome({ status: 502, json: {} }).message).toBe('host returned HTTP 502');
   });
 });
