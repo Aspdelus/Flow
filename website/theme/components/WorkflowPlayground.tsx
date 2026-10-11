@@ -114,6 +114,10 @@ import {
   type HostRunSummary,
 } from './WorkflowPlayground.host';
 import {
+  hostEditPlanSteps,
+  hostScopeSteps,
+} from './WorkflowPlayground.host-scopes';
+import {
   layoutPlaygroundGraphOffThread,
   schedulePlaygroundLayoutWarmup,
 } from './WorkflowPlayground.layout-client';
@@ -967,12 +971,59 @@ function WorkflowPlaygroundSurface({
     );
   }, [commit, copy.nodesArranged, fitPlaygroundView, running]);
 
+  // Run settings and iteration / loop settings change plan steps the canvas
+  // then redraws; committed like any canvas edit (undoable, saved by Save).
+  const editHostPlanSteps = useCallback(
+    (
+      edit: (steps: JsonObject[], current: HostCanvasDocument) => JsonObject[],
+      announcement: string,
+    ): boolean => {
+      if (!hostMode || !hostCanvas) return false;
+      if (!hostRunEditActions(hostCanvas).save) return false;
+      try {
+        commit(
+          hostEditPlanSteps(hostCanvas, graph, locale, catalog, edit).graph,
+        );
+        setAnnouncement(announcement);
+        return true;
+      } catch (error) {
+        setAnnouncement(error instanceof Error ? error.message : String(error));
+        return false;
+      }
+    },
+    [catalog, commit, graph, hostCanvas, hostMode, locale],
+  );
+
   const addNode = useCallback(
     (type: string, requestedPosition?: XYPosition) => {
       const manifest = localizeA3SFlowDagManifest(
         catalog.registry.require(type),
         locale,
       );
+      // A host plan's iteration / loop is a set of plan steps (the scope and
+      // its body agents), never Flow's generic container with a stub task.
+      if (hostMode && hostCanvas && (type === 'iteration' || type === 'loop')) {
+        let scopeId = '';
+        const added = editHostPlanSteps(
+          (_, current) => {
+            const scope = hostScopeSteps(current, type, locale);
+            scopeId = scope.scopeId;
+            return scope.steps;
+          },
+          locale === 'zh'
+            ? `已新增${type === 'loop' ? '循环' : '逐项处理'}（未保存），在右侧设置里调整`
+            : `Added ${type === 'loop' ? 'a loop' : 'an iteration'} (unsaved); adjust it in the settings`,
+        );
+        if (added) {
+          setSelectedNodeId(scopeId);
+          setSelectedAnnotationId(undefined);
+          setSelectedEdgeId(undefined);
+          setEditingEdgeId(undefined);
+          setActivePanel('settings');
+        }
+        closeNodeLibrary();
+        return;
+      }
       const result = pendingConnection
         ? addConnectedNodeIntoGraph(
             graph,
@@ -1011,7 +1062,10 @@ function WorkflowPlaygroundSurface({
       closeNodeLibrary,
       commit,
       copy,
+      editHostPlanSteps,
       graph,
+      hostCanvas,
+      hostMode,
       insertEdgeId,
       locale,
       pendingConnection,
@@ -2438,6 +2492,15 @@ function WorkflowPlaygroundSurface({
                       nodes: hostWithConditionInput(current, nodeId, source),
                     }))
                   }
+                  onPlanEdit={(edit) =>
+                    editHostPlanSteps(
+                      edit,
+                      locale === 'zh'
+                        ? '已修改步骤设置（未保存）'
+                        : 'Step settings changed (unsaved)',
+                    )
+                  }
+                  onRefuse={setAnnouncement}
                   onOtherwise={(nodeId, targets) =>
                     commit((current) => ({
                       ...current,

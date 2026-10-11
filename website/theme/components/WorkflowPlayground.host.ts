@@ -1541,12 +1541,18 @@ export function hostConditionInput(
 /** The control-flow editor a canvas node gets in host mode, if any. */
 export function hostStepEditorKind(
   node: PlaygroundNode,
-): 'condition' | 'approval' | null {
+): 'condition' | 'approval' | 'agent' | 'iteration' | 'loop' | null {
   const type = String(
     (node.data.dagNode?.data as JsonObject | undefined)?.type ?? '',
   );
   if (type === 'flow.condition') return 'condition';
   if (type === 'flow.hook') return 'approval';
+  // The rest edit plan fields, so only nodes that carry a plan step.
+  const step = node.data.hostPlanStep as JsonObject | undefined;
+  if (!step) return null;
+  const kind = String(step.kind ?? 'agent');
+  if (kind === 'agent' && type === 'flow.step') return 'agent';
+  if (kind === 'iteration' || kind === 'loop') return kind;
   return null;
 }
 
