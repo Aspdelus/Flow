@@ -2631,3 +2631,123 @@ describe('WorkflowPlayground host mode: the AI assistant and control flow', () =
     expect([rejected.refused, rejected.warnings]).toEqual([null, []]);
   });
 });
+
+describe('WorkflowPlayground host mode: the AI assistant edits iterations and loops', () => {
+  const fixture = JSON.parse(
+    readFileSync(
+      fileURLToPath(
+        new URL('./fixtures/funnel-conformance-plans.json', import.meta.url),
+      ),
+      'utf8',
+    ),
+  ) as { plans: Record<string, { plan: Record<string, unknown> }> };
+  // 17: list (list_output) -> each { quote } -> summary.
+  const plan = fixture.plans['17'].plan;
+  const canvas = () =>
+    canvasDocumentFromProposalDto({
+      schema_version: 'host.flow-http-proposal.v1',
+      run_id: 'run-l',
+      proposal_digest: 'sha256:l',
+      flow_dsl: { kind: 'app' },
+      execution_digest: 'feed',
+      approval_hook_waiting: true,
+      approval_token: 'tok',
+      proposal: { plan },
+    });
+
+  it('draws a suggested loop as a container with its body inside and saves it back as suggested', () => {
+    const steps = JSON.parse(JSON.stringify(plan.steps)) as Record<
+      string,
+      unknown
+    >[];
+    const list = steps.find((step) => step.step_id === 'list') as Record<
+      string,
+      unknown
+    >;
+    list.timeout_secs = 600;
+    const summary = steps.find((step) => step.step_id === 'summary') as Record<
+      string,
+      unknown
+    >;
+    summary.inputs = ['each.results', 'refine.feedback', 'refine.previous'];
+    const agent = summary.agent_id;
+    const suggestion = [
+      ...steps,
+      {
+        step_id: 'refine',
+        kind: 'loop',
+        objective: 'revise the summary until it passes',
+        inputs: ['each.results'],
+        depends_on: [],
+        body: ['summary', 'check'],
+        until: 'check.verdict',
+        pass_label: 'PASS',
+        collect: 'summary.summary',
+        max_rounds: 3,
+      },
+      {
+        step_id: 'check',
+        agent_id: agent,
+        version: '1.0.0',
+        objective: 'check it',
+        capabilities: ['read'],
+        inputs: ['summary.summary'],
+        outputs: ['verdict'],
+        depends_on: [],
+      },
+    ];
+    const next = applyCopilotSteps(canvas(), 'zh', hostCatalog(), suggestion);
+    const node = (id: string) =>
+      next.graph.nodes.find((item) => item.id === id);
+    expect(node('refine')?.data.dagNode.data.type).toBe('loop');
+    expect([node('summary')?.parentId, node('check')?.parentId]).toEqual([
+      'refine',
+      'refine',
+    ]);
+    const saved = hostCanvasFromGraph(next.canvas, next.graph).plan
+      .steps as Record<string, unknown>[];
+    const pick = (id: string) =>
+      JSON.parse(JSON.stringify(saved.find((step) => step.step_id === id)));
+    expect(pick('refine')).toEqual(
+      JSON.parse(
+        JSON.stringify(suggestion.find((step) => step.step_id === 'refine')),
+      ),
+    );
+    expect(pick('list').timeout_secs).toBe(600);
+    expect(pick('summary').inputs).toEqual([
+      'each.results',
+      'refine.feedback',
+      'refine.previous',
+    ]);
+  });
+
+  it('announces a dropped deadline or list output and still applies the suggestion', () => {
+    const outcome = copilotReplyOutcome(
+      {
+        message: 'ok',
+        suggestedSteps: plan.steps as Record<string, unknown>[],
+        refused: null,
+        warnings: [
+          {
+            code: 'CONTROL_SETTINGS_REMOVED',
+            steps: ['list'],
+            message:
+              'the suggestion drops the deadline, timeout fallbacks or list output of list',
+          },
+        ],
+        check: {
+          valid: true,
+          status: 'REVALIDATED',
+          reasonCodes: [],
+          message: null,
+          designNotes: [],
+        },
+      },
+      'en',
+    );
+    expect(outcome.apply).toBe(true);
+    expect(outcome.announcement).toContain(
+      'drops the deadline, timeout fallbacks or list output of list',
+    );
+  });
+});
