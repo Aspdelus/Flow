@@ -1,0 +1,18 @@
+---
+title: Group container
+description: Run a child-canvas scope once, as one step of the enclosing canvas.
+---
+
+# Group `group`
+
+A group container gathers nodes into a child canvas that the enclosing canvas sees as one step: control enters through `in`, the child canvas runs once, and control continues through `done`. Use it to present and review a self-contained piece of work together, such as a sub-plan or the assessment of one region, without turning it into a child workflow with a history of its own.
+
+## Structure
+
+`start_node_id` must point to the container's single internal `group-start`. Every child uses the container ID as `parentId`, and the entry node's `next` port connects to the first executable child. Child edges cannot cross the container boundary; nodes outside read the container's own result. A group may contain an iteration or a loop.
+
+## Group or child workflow
+
+A group describes graph structure and emits no runtime command; the host decides how its child canvas compiles into steps. Use a [child workflow](./child-workflow) when the work needs its own history, state, and cancellation policy, and an [iteration](./iteration) to repeat a child graph over a collection.
+
+<NodeReference type="group" />
