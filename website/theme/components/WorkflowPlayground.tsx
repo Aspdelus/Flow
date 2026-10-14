@@ -1,6 +1,7 @@
 import { CheckCircle } from '@phosphor-icons/react';
 import {
   advanceHostEditRevision,
+  hostApprovalBinding,
   hostSaveOutcome,
   nextHostEditRevision,
   hostRunEditActions,
@@ -15,6 +16,7 @@ import {
   type HostComposeProgressFrame,
   type HostGateRequest,
   type HostRecoveryFailure,
+  type HostSubplanMode,
   type JsonObject,
 } from '@a3s-lab/flow-ui';
 import { useLang, useSite, useVersion, withBase } from '@rspress/core/runtime';
@@ -92,6 +94,8 @@ import {
   hostUnsavedNodesNotice,
   hostWithApprovalInputs,
   hostWithConditionInput,
+  hostPlanViews,
+  hostRunExecutionForSubplan,
   isHostRunExecutionActive,
   isProposalNotYetReady,
   isProposalRefused,
@@ -256,6 +260,10 @@ function WorkflowPlaygroundSurface({
   // Post-approval execution state, polled from GET /v1/runs/{id} (see the
   // execution-poll effect below). Display-only: Save/Approve gating still
   // reads hostCanvas.flow_status, which only changes on an explicit refetch.
+  // The sub-plan the canvas shows (W26), `null` for the parent plan: every
+  // refresh from the host keeps showing it while the plan still has it.
+  const hostSubplanRef = useRef<string | null>(null);
+  hostSubplanRef.current = hostCanvas?.subplan ?? null;
   const [hostExecution, setHostExecution] = useState<HostRunExecution | null>(
     null,
   );
@@ -1305,12 +1313,20 @@ function WorkflowPlaygroundSurface({
 
   // Host-mode nodes show the host run's per-step execution state; a local
   // simulation run (if the operator starts one) still takes precedence.
+  const viewSubplan = hostCanvas?.subplan ?? null;
+  const viewExecution = useMemo(
+    () =>
+      hostExecution && viewSubplan
+        ? hostRunExecutionForSubplan(hostExecution, viewSubplan)
+        : hostExecution,
+    [hostExecution, viewSubplan],
+  );
   const displayStatuses = useMemo(
     () =>
-      hostExecution && !running
-        ? { ...hostExecution.nodeStatuses, ...statuses }
+      viewExecution && !running
+        ? { ...viewExecution.nodeStatuses, ...statuses }
         : statuses,
-    [hostExecution, running, statuses],
+    [viewExecution, running, statuses],
   );
 
   const { displayEdges, displayNodes } = useWorkflowPlaygroundElements({
@@ -1462,12 +1478,29 @@ function WorkflowPlaygroundSurface({
       hostUnsavedNodes(graph),
       locale,
     );
+    // A save that changes the sub-plans has them planned again before the
+    // host answers (W26), which takes a while with a real model.
+    const subplanTasks = (canvas: HostCanvasDocument) =>
+      JSON.stringify(
+        (Array.isArray(canvas.plan.steps) ? (canvas.plan.steps as JsonObject[]) : [])
+          .filter((step) => step.kind === 'subplan')
+          .map((step) => [step.step_id, step.objective, step.inputs]),
+      );
+    const replansSubplans =
+      !hostCanvas.subplan && subplanTasks(nextCanvas) !== subplanTasks(hostCanvas);
+    if (replansSubplans) {
+      setAnnouncement(
+        locale === 'zh'
+          ? '正在保存，并按修改重新规划子计划…'
+          : 'Saving, and planning the changed sub-plans again…',
+      );
+    }
     return client.saveCanvas(nextCanvas, editRevision).then(async (result) => {
       const outcome = hostSaveOutcome(result);
       const proposal = result.json.proposal;
       const refreshed =
         proposal && typeof proposal === 'object'
-          ? refreshCanvasFromProposalDto(proposal)
+          ? refreshCanvasFromProposalDto(proposal, hostSubplanRef.current)
           : null;
       // The next save's revision: past this one if the host recorded it, and
       // past every revision the host has (an error answer carries none, so
@@ -1549,7 +1582,10 @@ function WorkflowPlaygroundSurface({
             dto.replan_pending === false &&
             dto.approval_hook_waiting === true
           ) {
-            const refreshed = refreshCanvasFromProposalDto(dto);
+            const refreshed = refreshCanvasFromProposalDto(
+              dto,
+              hostSubplanRef.current,
+            );
             setHostCanvas(refreshed);
             lastSavedPlanStepsRef.current = JSON.stringify(
               refreshed.plan.steps,
@@ -1572,6 +1608,41 @@ function WorkflowPlaygroundSurface({
       })
       .finally(() => setHostBusy(false));
   }, [catalog, editRevision, graph, hostCanvas, hostMode, locale, restore]);
+
+  // Switch the canvas between the parent plan and one of its sub-plans
+  // (each is edited and saved on its own; Approve covers them all).
+  const viewHostPlan = useCallback(
+    (subplanId: string | null) => {
+      if (!hostMode?.runId || !hostCanvas) return;
+      if ((hostCanvas.subplan ?? null) === subplanId) return;
+      if (hostCanvasIsDirty()) {
+        setAnnouncement(
+          locale === 'zh'
+            ? '当前计划有未保存的修改，请先保存'
+            : 'This plan has unsaved edits; save them first',
+        );
+        return;
+      }
+      setHostBusy(true);
+      void createHostClient(hostMode)
+        .getProposal(hostMode.runId)
+        .then((dto) => {
+          const next = refreshCanvasFromProposalDto(dto, subplanId);
+          setHostCanvas(next);
+          lastSavedPlanStepsRef.current = JSON.stringify(next.plan.steps);
+          restore(graphFromHostCanvas(next, locale, catalog));
+          setSelectedNodeId(undefined);
+        })
+        .catch((error: unknown) => {
+          setAnnouncement(
+            error instanceof Error ? error.message : String(error),
+          );
+        })
+        .finally(() => setHostBusy(false));
+    },
+    [catalog, hostCanvas, hostCanvasIsDirty, hostMode, locale, restore],
+  );
+  const planViews = hostPlanViews(hostCanvas, locale);
 
   const saveToHost = useCallback(() => {
     if (!hostMode || !hostCanvas) return;
@@ -1604,13 +1675,22 @@ function WorkflowPlaygroundSurface({
   // run's URL on success, mirroring selectHostRun exactly; throws on
   // failure so the dialog can show the error and stay open.
   const submitNewRunOnHost = useCallback(
-    async (taskText: string, permissionCeiling: string[]) => {
+    async (
+      taskText: string,
+      permissionCeiling: string[],
+      subplans: HostSubplanMode,
+    ) => {
       if (!hostMode) return;
       // Navigate as soon as the run id is minted: POST /v1/runs only
       // answers once planning is over, and the run page is where planning
       // progress is shown. A start failure surfaces there (see the load
       // effect's pendingRunStart handling), not in this dialog.
-      const { runId } = beginNewRun(hostMode, taskText, permissionCeiling);
+      const { runId } = beginNewRun(
+        hostMode,
+        taskText,
+        permissionCeiling,
+        subplans,
+      );
       selectHostRun(runId);
     },
     [hostMode, selectHostRun],
@@ -1648,10 +1728,9 @@ function WorkflowPlaygroundSurface({
           typeof current.approval.token === 'string'
             ? current.approval.token
             : '';
-        const digest =
-          typeof current.proposal_digest === 'string'
-            ? current.proposal_digest
-            : '';
+        // The parent proposal, and with sub-plans the whole bundle (W26).
+        const binding = hostApprovalBinding(current);
+        const digest = binding.proposalDigest;
         if (!token || !digest) {
           throw new Error(
             locale === 'zh'
@@ -1661,6 +1740,7 @@ function WorkflowPlaygroundSurface({
         }
         return issueApprovalRecord({
           proposalDigest: digest,
+          bundleDigest: binding.bundleDigest,
           tenantId: hostMode.tenantId,
           principalRef: hostMode.principalRef,
           approved: true,
@@ -1692,7 +1772,10 @@ function WorkflowPlaygroundSurface({
         // immediately, instead of still showing the stale pre-approve state
         // until the operator manually reloads.
         return client.getProposal(hostMode.runId).then((proposal) => {
-          const refreshed = refreshCanvasFromProposalDto(proposal);
+          const refreshed = refreshCanvasFromProposalDto(
+            proposal,
+            hostSubplanRef.current,
+          );
           setHostCanvas(refreshed);
           lastSavedPlanStepsRef.current = JSON.stringify(refreshed.plan.steps);
           restore(graphFromHostCanvas(refreshed, locale, catalog));
@@ -1731,7 +1814,10 @@ function WorkflowPlaygroundSurface({
     void client
       .getProposal(hostMode.runId)
       .then((proposal) => {
-        const refreshed = refreshCanvasFromProposalDto(proposal);
+        const refreshed = refreshCanvasFromProposalDto(
+          proposal,
+          hostSubplanRef.current,
+        );
         setHostCanvas(refreshed);
         lastSavedPlanStepsRef.current = JSON.stringify(refreshed.plan.steps);
         restore(graphFromHostCanvas(refreshed, locale, catalog));
@@ -1764,7 +1850,10 @@ function WorkflowPlaygroundSurface({
       }
       const client = createHostClient(hostMode);
       const proposal = await client.getProposal(hostMode.runId);
-      const refreshed = refreshCanvasFromProposalDto(proposal);
+      const refreshed = refreshCanvasFromProposalDto(
+        proposal,
+        hostSubplanRef.current,
+      );
       setHostCanvas(refreshed);
       lastSavedPlanStepsRef.current = JSON.stringify(refreshed.plan.steps);
       restore(graphFromHostCanvas(refreshed, locale, catalog));
@@ -1792,14 +1881,20 @@ function WorkflowPlaygroundSurface({
         setHostExecutionWatch((value) => value + 1);
       }
       setHostOpenGate(null);
+      // A sub-plan's gate (`<id>/<step>`) ends only that sub-plan.
+      const inSubplan = hostOpenGate.step_id.includes('/');
       setAnnouncement(
         locale === 'zh'
           ? approved
             ? '已批准，继续执行'
-            : '已驳回，本次运行在此结束'
+            : inSubplan
+              ? '已驳回，该子计划在此结束，父计划继续'
+              : '已驳回，本次运行在此结束'
           : approved
             ? 'Approved, continuing'
-            : 'Rejected, the run ends here',
+            : inSubplan
+              ? 'Rejected, this sub-plan ends here; the parent plan goes on'
+              : 'Rejected, the run ends here',
       );
     },
     [hostMode, hostOpenGate, locale],
@@ -1827,6 +1922,11 @@ function WorkflowPlaygroundSurface({
   const requestHostCopilot = useCallback(
     async (instruction: string): Promise<string | false> => {
       if (!hostMode || !hostCanvas) return false;
+      if (hostCanvas.subplan) {
+        return locale === 'zh'
+          ? 'AI 助手目前只编辑父计划；子计划请直接在画布上修改。'
+          : 'The AI assistant edits the parent plan only; edit a sub-plan on the canvas.';
+      }
       if (!hostRunEditActions(hostCanvas).addStep) {
         return locale === 'zh'
           ? '该运行已结束，不能再编辑。'
@@ -2081,7 +2181,9 @@ function WorkflowPlaygroundSurface({
           setSelectedEdgeId(undefined);
           setActivePanel('settings');
         }}
-        onHostReplan={hostEdits?.save ? replanOnHost : undefined}
+        onHostReplan={
+          hostEdits?.save && !viewSubplan ? replanOnHost : undefined
+        }
         onHostSave={hostEdits?.save ? saveToHost : undefined}
         onOpenDocument={openDocument}
         onOpenExtensions={toggleExtensions}
@@ -2114,10 +2216,10 @@ function WorkflowPlaygroundSurface({
               : undefined
         }
         execution={
-          hostExecution && isHostRunExecutionActive(hostExecution.status)
+          viewExecution && isHostRunExecutionActive(viewExecution.status)
             ? {
-                runningStepIds: hostExecution.runningStepIds,
-                completed: hostExecution.completedStepCount,
+                runningStepIds: viewExecution.runningStepIds,
+                completed: viewExecution.completedStepCount,
                 total: Array.isArray(hostCanvas?.plan?.steps)
                   ? hostCanvas.plan.steps.length
                   : null,
@@ -2162,6 +2264,26 @@ function WorkflowPlaygroundSurface({
         <p data-testid="host-load-error" role="alert">
           {hostLoadError}
         </p>
+      ) : null}
+      {planViews ? (
+        <nav
+          aria-label={locale === 'zh' ? '计划与子计划' : 'Plan and sub-plans'}
+          className="a3s-host-plan-views"
+          data-testid="host-plan-views"
+        >
+          {planViews.map((view) => (
+            <button
+              aria-pressed={view.id === viewSubplan}
+              data-testid={`host-plan-view-${view.id ?? 'parent'}`}
+              disabled={!view.ready || hostBusy}
+              key={view.id ?? 'parent'}
+              onClick={() => viewHostPlan(view.id)}
+              type="button"
+            >
+              {view.label}
+            </button>
+          ))}
+        </nav>
       ) : null}
       <noscript>
         {versions.map((targetVersion) => (

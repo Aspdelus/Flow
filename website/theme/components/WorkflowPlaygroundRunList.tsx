@@ -1,6 +1,7 @@
 import { ArrowClockwise, Clock, Sparkle } from '@phosphor-icons/react';
 import { useState } from 'react';
 import type { FlowWebsiteLocale } from './flow-node-catalog';
+import type { HostSubplanMode } from '@a3s-lab/flow-ui';
 import type { HostRunSummary } from './WorkflowPlayground.host';
 import { WorkflowPlaygroundNewRunDialog } from './WorkflowPlaygroundNewRunDialog';
 
@@ -40,6 +41,7 @@ export type WorkflowPlaygroundRunListProps = {
   onSubmitNewRun: (
     taskText: string,
     permissionCeiling: string[],
+    subplans: HostSubplanMode,
   ) => Promise<void>;
 };
 
@@ -76,11 +78,12 @@ export function WorkflowPlaygroundRunList({
   const submitNewRun = async (
     taskText: string,
     permissionCeiling: string[],
+    subplans: HostSubplanMode,
   ) => {
     setSubmitting(true);
     setSubmitError(null);
     try {
-      await onSubmitNewRun(taskText, permissionCeiling);
+      await onSubmitNewRun(taskText, permissionCeiling, subplans);
       setDialogOpen(false);
     } catch (submitError_: unknown) {
       setSubmitError(
@@ -166,8 +169,8 @@ export function WorkflowPlaygroundRunList({
           error={submitError}
           locale={locale}
           onClose={() => setDialogOpen(false)}
-          onSubmit={(taskText, permissionCeiling) =>
-            void submitNewRun(taskText, permissionCeiling)
+          onSubmit={(taskText, permissionCeiling, subplans) =>
+            void submitNewRun(taskText, permissionCeiling, subplans)
           }
         />
       )}

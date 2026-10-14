@@ -2,8 +2,10 @@ import { Plus, Sparkle, X } from '@phosphor-icons/react';
 import { useEffect, useId, useRef, useState, type FormEvent } from 'react';
 import type { FlowWebsiteLocale } from './flow-node-catalog';
 import { SelectControl } from '@a3s-lab/flow-ui/react';
+import type { HostSubplanMode } from '@a3s-lab/flow-ui';
 
 const PERMISSION_CEILING_PRESETS = ['read', 'read,write'] as const;
+const SUBPLAN_MODES: readonly HostSubplanMode[] = ['auto', 'encouraged', 'forbidden'];
 type PermissionCeilingPreset = (typeof PERMISSION_CEILING_PRESETS)[number];
 
 export type WorkflowPlaygroundNewRunDialogProps = {
@@ -11,7 +13,11 @@ export type WorkflowPlaygroundNewRunDialogProps = {
   error: string | null;
   locale: FlowWebsiteLocale;
   onClose: () => void;
-  onSubmit: (taskText: string, permissionCeiling: string[]) => void;
+  onSubmit: (
+    taskText: string,
+    permissionCeiling: string[],
+    subplans: HostSubplanMode,
+  ) => void;
 };
 
 /**
@@ -40,6 +46,8 @@ export function WorkflowPlaygroundNewRunDialog({
   const [taskText, setTaskText] = useState('');
   const [permissionCeiling, setPermissionCeiling] =
     useState<PermissionCeilingPreset>('read');
+  // Whether the AI may split the task into sub-plans (W26), chosen up front.
+  const [subplans, setSubplans] = useState<HostSubplanMode>('auto');
 
   useEffect(() => {
     previousFocus.current =
@@ -92,7 +100,7 @@ export function WorkflowPlaygroundNewRunDialog({
   const submit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (busy || !taskText.trim()) return;
-    onSubmit(taskText, permissionCeiling.split(','));
+    onSubmit(taskText, permissionCeiling.split(','), subplans);
   };
 
   const title = locale === 'zh' ? '新建规划' : 'New task';
@@ -108,6 +116,31 @@ export function WorkflowPlaygroundNewRunDialog({
   const ceilingLabel = locale === 'zh' ? '权限上限' : 'Permission ceiling';
   const ceilingReadOnly = locale === 'zh' ? '只读' : 'Read-only';
   const ceilingReadWrite = locale === 'zh' ? '读写' : 'Read + write';
+  const subplansLabel = locale === 'zh' ? '子计划' : 'Sub-plans';
+  const subplanModeLabels: Record<HostSubplanMode, string> =
+    locale === 'zh'
+      ? {
+          auto: '由 AI 判断是否拆分',
+          encouraged: '鼓励拆成子计划',
+          forbidden: '不拆分（不使用子计划）',
+        }
+      : {
+          auto: 'Let the AI decide',
+          encouraged: 'Prefer sub-plans',
+          forbidden: 'No sub-plans',
+        };
+  const subplanModeHints: Record<HostSubplanMode, string> =
+    locale === 'zh'
+      ? {
+          auto: '任务里有几块各自需要多个步骤的部分时，AI 可能把它们分别拆成子计划。',
+          encouraged: '要求 AI 把需要多个步骤的部分各拆成一个子计划，分别规划后与主计划一起批准。',
+          forbidden: '整个任务只做一份计划；含子计划的方案和修改都会被拒绝。',
+        }
+      : {
+          auto: 'The AI may split parts that each need several steps of their own into sub-plans.',
+          encouraged: 'Ask the AI to plan each part that needs several steps as a sub-plan, approved with the main plan.',
+          forbidden: 'One plan for the whole task; a plan or an edit with a sub-plan is refused.',
+        };
   const cancelLabel = locale === 'zh' ? '取消' : 'Cancel';
   const submitLabel = locale === 'zh' ? '提交' : 'Submit';
   const submittingLabel = locale === 'zh' ? '提交中…' : 'Submitting…';
@@ -177,6 +210,26 @@ export function WorkflowPlaygroundNewRunDialog({
               <option value="read">{ceilingReadOnly}</option>
               <option value="read,write">{ceilingReadWrite}</option>
             </SelectControl>
+          </label>
+          <label className="a3s-new-run-dialog__field">
+            <span>{subplansLabel}</span>
+            <SelectControl
+              data-testid="new-run-subplans"
+              disabled={busy}
+              onChange={(event) =>
+                setSubplans(event.target.value as HostSubplanMode)
+              }
+              value={subplans}
+            >
+              {SUBPLAN_MODES.map((mode) => (
+                <option key={mode} value={mode}>
+                  {subplanModeLabels[mode]}
+                </option>
+              ))}
+            </SelectControl>
+            <small className="a3s-new-run-dialog__hint">
+              {subplanModeHints[subplans]}
+            </small>
           </label>
           {error && (
             <p className="a3s-new-run-dialog__error" role="alert">

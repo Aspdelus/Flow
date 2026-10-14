@@ -49,6 +49,22 @@ export function planCheckProblems(view: unknown): HostPlanProblem[] {
   }));
 }
 
+/** One sub-plan of a host plan (`GET /proposal`'s `subplans`), planned after
+ * the parent and approved with it as one bundle. `proposal` is null while it
+ * is still being planned. */
+export type HostSubplanView = {
+  step_id: string;
+  objective: unknown;
+  plan_step_id: unknown;
+  proposal_digest: unknown;
+  proposal: JsonObject | null;
+  flow_dsl: unknown;
+  execution_digest: unknown;
+  plan_check: unknown;
+  plan_origin: unknown;
+  last_edit_revision: unknown;
+};
+
 export type HostCanvasDocument = {
   schema_version: typeof CANVAS_SCHEMA;
   authority: typeof PLAN_SCHEMA;
@@ -89,6 +105,14 @@ export type HostCanvasDocument = {
     path: string;
     body_schema: typeof PLAN_EDIT_SCHEMA;
   };
+  /** The plan's sub-plans; absent when it has none. */
+  subplans?: HostSubplanView[];
+  /** What one approval of a plan with sub-plans binds (parent + each sub-proposal). */
+  bundle_digest?: unknown;
+  /** Set when this canvas shows one sub-plan: its step id in the parent plan. */
+  subplan?: string;
+  /** For a sub-plan's canvas, the parent proposal the approval names. */
+  parent_proposal_digest?: unknown;
 };
 
 /** Flow `WorkflowRunStatus` values (lowercased) that can never accept a new
@@ -355,6 +379,88 @@ export function canvasDocumentFromProposalDto(
       path: `/v1/runs/${runId}/plan-edits`,
       body_schema: PLAN_EDIT_SCHEMA,
     },
+    ...(Array.isArray(dto.subplans)
+      ? {
+          subplans: dto.subplans.filter(isObject).map(subplanView),
+          bundle_digest: dto.bundle_digest,
+        }
+      : {}),
+  };
+}
+
+function subplanView(view: JsonObject): HostSubplanView {
+  return {
+    step_id: String(view.step_id ?? ''),
+    objective: view.objective,
+    plan_step_id: view.plan_step_id,
+    proposal_digest: view.proposal_digest,
+    proposal: isObject(view.proposal) ? view.proposal : null,
+    flow_dsl: view.flow_dsl,
+    execution_digest: view.execution_digest,
+    plan_check: view.plan_check,
+    plan_origin: view.plan_origin,
+    last_edit_revision: view.last_edit_revision,
+  };
+}
+
+/** The canvas of sub-plan `subplanId` of `parent` (a parent plan's canvas):
+ * edited and saved on its own (`/v1/runs/{id}/subplans/{subplanId}/plan-edits`),
+ * approved with the parent through the parent's approval hook. `null` while
+ * it is still being planned or when the plan has no such sub-plan. */
+export function subplanCanvasDocument(
+  parent: HostCanvasDocument,
+  subplanId: string,
+): HostCanvasDocument | null {
+  const view = parent.subplans?.find((item) => item.step_id === subplanId);
+  if (!view?.proposal) return null;
+  const canvas = canvasDocumentFromProposalDto({
+    run_id: parent.run_id,
+    flow_status: parent.flow_status,
+    proposal: view.proposal,
+    proposal_digest: view.proposal_digest,
+    flow_dsl: view.flow_dsl,
+    execution_digest: view.execution_digest,
+    plan_check: view.plan_check,
+    plan_origin: view.plan_origin,
+    last_edit_revision: view.last_edit_revision,
+    approval_hook_waiting: parent.approval.hook_waiting,
+    approval_token: parent.approval.token,
+  });
+  return {
+    ...canvas,
+    save: {
+      ...canvas.save,
+      path: `/v1/runs/${parent.run_id}/subplans/${encodeURIComponent(subplanId)}/plan-edits`,
+    },
+    subplans: parent.subplans,
+    bundle_digest: parent.bundle_digest,
+    subplan: subplanId,
+    parent_proposal_digest: parent.proposal_digest,
+  };
+}
+
+/** The canvas to show for `dto`: the parent plan, or sub-plan `subplanId`
+ * of it once that is planned. */
+export function canvasForView(
+  dto: unknown,
+  subplanId: string | null,
+): HostCanvasDocument {
+  const parent = canvasDocumentFromProposalDto(dto);
+  return (subplanId && subplanCanvasDocument(parent, subplanId)) || parent;
+}
+
+/** What the plan approval binds, from any canvas of the run: the parent
+ * proposal, and with sub-plans the bundle. */
+export function hostApprovalBinding(canvas: HostCanvasDocument): {
+  proposalDigest: string;
+  bundleDigest?: string;
+} {
+  const parent = canvas.subplan ? canvas.parent_proposal_digest : canvas.proposal_digest;
+  return {
+    proposalDigest: typeof parent === 'string' ? parent : '',
+    ...(typeof canvas.bundle_digest === 'string'
+      ? { bundleDigest: canvas.bundle_digest }
+      : {}),
   };
 }
 
@@ -424,6 +530,7 @@ function stringItems(value: unknown): string[] {
 function stepOutputs(step: JsonObject | undefined): string[] {
   if (step?.kind === 'iteration') return ['item', 'results'];
   if (step?.kind === 'loop') return ['previous', 'feedback', 'result', 'status'];
+  if (step?.kind === 'subplan') return ['result', 'status'];
   return stringItems(step?.outputs);
 }
 

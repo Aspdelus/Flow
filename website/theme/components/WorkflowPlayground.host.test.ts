@@ -26,7 +26,9 @@ import {
   hostConditionChain,
   hostConditionInput,
   hostOtherwiseTargets,
+  hostPlanViews,
   hostRewireOtherwise,
+  hostRunExecutionForSubplan,
   hostRunExecutionFromSnapshot,
   hostStepOutputOptions,
   hostUnsavedNodes,
@@ -1458,6 +1460,33 @@ describe('WorkflowPlayground host mode', () => {
     }
   });
 
+  it('beginNewRun sends the sub-plan choice made with the task, and nothing for auto', async () => {
+    const bodies: Record<string, unknown>[] = [];
+    const fetchImpl = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      bodies.push(JSON.parse(String(init?.body)));
+      return new Response(JSON.stringify({ status: 'suspended' }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    });
+    vi.stubGlobal('fetch', fetchImpl);
+    try {
+      const config = {
+        baseUrl: 'http://127.0.0.1:9',
+        runId: '',
+        tenantId: 'tenant-local-validation',
+        principalRef: 'reviewer@local',
+      };
+      await beginNewRun(config, 'a task', ['read'], 'forbidden').started;
+      await beginNewRun(config, 'a task', ['read'], 'encouraged').started;
+      await beginNewRun(config, 'a task', ['read']).started;
+      expect(bodies.map((body) => body.subplans)).toEqual(['forbidden', 'encouraged', undefined]);
+      expect('subplans' in bodies[2]).toBe(false);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it('beginNewRun keeps a failed start visible with the host error text', async () => {
     const fetchImpl = vi.fn(
       async () =>
@@ -2200,6 +2229,27 @@ describe('WorkflowPlayground host mode: editing control flow on the canvas', () 
     expect(route.inputs).toEqual(['inventory.stock']);
   });
 
+  it('turns a sub-workflow dragged in from the library into a sub-plan step', () => {
+    const document = canvasOf(fixture.plans[0].plan);
+    const graph = graphFromHostCanvas(document, 'zh', hostCatalog());
+    const child = (id: string, desc: string) =>
+      createPlaygroundNode(id, 'flow.child-workflow', { x: 0, y: 0 }, 'zh', {
+        configuration: { title: '子计划', desc, child_id: id },
+        registry: hostCatalog().registry,
+      });
+    const next = {
+      ...graph,
+      nodes: [...graph.nodes, child('child_1', '评估欧盟市场'), child('child_2', '评估美国市场')],
+      edges: [...graph.edges, wire('inventory', 'success', 'child_1')],
+    };
+    expect(hostUnsavedNodes(next)).toEqual([]);
+    const saved = hostCanvasFromGraph(document, next);
+    // It works from what is wired into it, else from the task.
+    expect(stepOf(saved, 'child_1')).toMatchObject({ kind: 'subplan', objective: '评估欧盟市场', inputs: ['inventory.stock'] });
+    expect(stepOf(saved, 'child_2')).toMatchObject({ kind: 'subplan', objective: '评估美国市场', inputs: ['task.goal'] });
+    expect(stepOf(saved, 'child_1').agent_id).toBeUndefined();
+  });
+
   it('turns a condition, a gate and a stop dragged in from the library into plan steps', () => {
     const document = canvasOf(fixture.plans[0].plan);
     const graph = graphFromHostCanvas(document, 'zh', hostCatalog());
@@ -2749,5 +2799,149 @@ describe('WorkflowPlayground host mode: the AI assistant edits iterations and lo
     expect(outcome.announcement).toContain(
       'drops the deadline, timeout fallbacks or list output of list',
     );
+  });
+});
+
+describe('WorkflowPlayground host mode: sub-plans (W26)', () => {
+  const fixture = JSON.parse(
+    readFileSync(
+      fileURLToPath(
+        new URL('./fixtures/funnel-conformance-plans.json', import.meta.url),
+      ),
+      'utf8',
+    ),
+  ) as { plans: Record<number, { plan: Record<string, unknown> }> };
+  const plan = fixture.plans[23].plan;
+  const subplan = (stepIds: string[]) => ({
+    proposal_digest: 'sha256:sub',
+    plan: {
+      steps: stepIds.map((step_id) => ({
+        step_id,
+        agent_id: 'frontend-developer',
+        objective: step_id,
+        depends_on: [],
+      })),
+      edges: [],
+      execution_order: stepIds,
+    },
+  });
+  const canvas = () =>
+    canvasDocumentFromProposalDto({
+      run_id: 'run-sub',
+      proposal_digest: 'sha256:p',
+      approval_hook_waiting: true,
+      approval_token: 'tok',
+      bundle_digest: 'sha256:b',
+      proposal: { plan },
+      subplans: [
+        {
+          step_id: 'eu',
+          proposal_digest: 'sha256:eu',
+          proposal: subplan(['audit', 'fixes']),
+        },
+        { step_id: 'us', proposal: null },
+      ],
+    });
+
+  it('draws a sub-plan as one child-workflow node and saves the plan unchanged', () => {
+    const document = canvas();
+    const graph = graphFromHostCanvas(document, 'zh', hostCatalog());
+    const eu = graph.nodes.find((node) => node.id === 'eu');
+    expect(eu?.data.dagNode.data.type).toBe('flow.child-workflow');
+    expect(eu?.data.dagNode.data.title).toBe('子计划 · 2 步');
+    expect(
+      graph.nodes.find((node) => node.id === 'us')?.data.dagNode.data.title,
+    ).toBe('子计划');
+    expect(
+      graph.edges.some(
+        (edge) => edge.source === 'eu' && edge.target === 'summary',
+      ),
+    ).toBe(true);
+    const saved = hostCanvasFromGraph(document, graph);
+    expect(JSON.parse(JSON.stringify(saved.plan.steps))).toEqual(plan.steps);
+    expect(saved.plan.edges).toEqual(plan.edges);
+    // A condition may route on how a sub-plan ended.
+    expect(hostStepOutputOptions(graph)).toEqual(
+      expect.arrayContaining(['eu.result', 'eu.status', 'us.status']),
+    );
+    // A gate dragged in after a sub-plan reviews what it produced.
+    const gate = createPlaygroundNode('hook_1', 'flow.hook', { x: 0, y: 0 }, 'zh', {
+      configuration: { title: '人工审批', desc: '看一眼欧盟结论' },
+      registry: hostCatalog().registry,
+    });
+    const nodes = [...graph.nodes, gate];
+    const withGate = {
+      ...graph,
+      nodes,
+      edges: [
+        ...graph.edges,
+        createPlaygroundEdge(
+          { source: 'eu', sourceHandle: 'completed', target: 'hook_1', targetHandle: 'in' },
+          nodes,
+          'zh',
+          hostCatalog().registry,
+        ),
+      ],
+    };
+    const gated = hostCanvasFromGraph(document, withGate);
+    const gateStep = (gated.plan.steps as Record<string, unknown>[]).find(
+      (step) => step.step_id === 'hook_1',
+    );
+    expect(gateStep?.inputs).toEqual(['eu.result', 'eu.status']);
+  });
+
+  it('lists the plans the canvas can show, a sub-plan once it is planned', () => {
+    expect(hostPlanViews(canvas(), 'zh')).toEqual([
+      { id: null, label: '父计划', ready: true },
+      { id: 'eu', label: '子计划 eu', ready: true },
+      { id: 'us', label: '子计划 us', ready: false },
+    ]);
+    expect(
+      hostPlanViews(
+        canvasDocumentFromProposalDto({ run_id: 'r', proposal: { plan } }),
+        'zh',
+      ),
+    ).toBeNull();
+  });
+
+  it("shows a sub-plan's steps on its node in the parent and on its own canvas", () => {
+    const execution = hostRunExecutionFromSnapshot({
+      status: 'suspended',
+      steps: {
+        'orchestrator.plan': { status: 'completed' },
+        'agent:eu/audit': { status: 'completed' },
+        'agent:eu/fixes': { status: 'running' },
+        'subplan:us': {
+          status: 'completed',
+          output: { status: 'rejected', skipped_steps: ['us/ship'] },
+        },
+      },
+      hooks: { 'gate:eu/signoff': { status: 'active' } },
+    });
+    // The parent: eu runs while its steps do; us ended rejected.
+    expect(execution.nodeStatuses.eu).toBe('running');
+    expect(execution.nodeStatuses.us).toBe('error');
+    expect(execution.openGateStepId).toBe('eu/signoff');
+    expect(execution.skippedStepIds).toEqual(['us/ship']);
+    // eu's own canvas: its steps without the prefix.
+    const eu = hostRunExecutionForSubplan(execution, 'eu');
+    expect(eu.nodeStatuses).toEqual({
+      audit: 'success',
+      fixes: 'running',
+      signoff: 'waiting',
+      start: 'success',
+    });
+    expect([eu.runningStepIds, eu.openGateStepId]).toEqual([
+      ['fixes'],
+      'signoff',
+    ]);
+    // Counted against its own steps, not the whole run's.
+    expect([eu.completedStepCount, eu.failedStepCount]).toEqual([1, 0]);
+    const us = hostRunExecutionForSubplan(execution, 'us');
+    expect([
+      us.skippedStepIds,
+      us.nodeStatuses.done,
+      us.openGateStepId,
+    ]).toEqual([['ship'], 'error', null]);
   });
 });

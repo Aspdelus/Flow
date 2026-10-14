@@ -4,7 +4,10 @@ import {
   applyCanvasNodeEdits,
   planEdgesFromSteps,
   canvasDocumentFromProposalDto,
+  canvasForView,
+  hostApprovalBinding,
   hostRunEditActions,
+  subplanCanvasDocument,
   isHostRunEditable,
   planEditBodyFromCanvas,
   hostSaveOutcome,
@@ -449,5 +452,75 @@ describe('host edit revisions and save outcomes', () => {
     const conflict = hostSaveOutcome({ status: 409, json: { error: 'CONFLICT: edit_revision 2 was already saved with a different plan' } });
     expect(conflict).toEqual({ saved: false, recorded: false, message: 'CONFLICT: edit_revision 2 was already saved with a different plan' });
     expect(hostSaveOutcome({ status: 502, json: {} }).message).toBe('host returned HTTP 502');
+  });
+});
+
+describe('host canvas sub-plans (W26)', () => {
+  const subplanProposal = {
+    proposal_digest: 'sha256:eu',
+    plan: {
+      schema_version: 'host.agent-plan.v2',
+      steps: [
+        { step_id: 'audit', agent_id: 'frontend-developer', objective: 'audit', inputs: ['task.goal'], outputs: ['report'], depends_on: [] },
+      ],
+      edges: [],
+      execution_order: ['audit'],
+    },
+  };
+  const dto = {
+    run_id: 'run-1',
+    flow_status: 'suspended',
+    proposal_digest: 'sha256:parent',
+    approval_hook_waiting: true,
+    approval_token: 'tok',
+    bundle_digest: 'sha256:bundle',
+    proposal: {
+      plan: {
+        schema_version: 'host.agent-plan.v2',
+        steps: [
+          { step_id: 'eu', kind: 'subplan', objective: 'EU market', inputs: ['task.goal'], depends_on: [] },
+          { step_id: 'us', kind: 'subplan', objective: 'US market', inputs: ['task.goal'], depends_on: [] },
+        ],
+        edges: [],
+        execution_order: ['eu', 'us'],
+      },
+    },
+    subplans: [
+      { step_id: 'eu', objective: 'EU market', plan_step_id: 'orchestrator.plan.sub:eu', proposal_digest: 'sha256:eu', proposal: subplanProposal, flow_dsl: { kind: 'app' }, plan_check: null, plan_origin: 'human_edit', last_edit_revision: 2 },
+      { step_id: 'us', objective: 'US market', plan_step_id: 'orchestrator.plan.sub:us', proposal: null, last_edit_revision: 0 },
+    ],
+  };
+
+  it('carries the sub-plans and the bundle only for a plan that has them', () => {
+    const canvas = canvasDocumentFromProposalDto(dto);
+    expect(canvas.subplans?.map((view) => [view.step_id, view.proposal !== null])).toEqual([['eu', true], ['us', false]]);
+    expect(canvas.bundle_digest).toBe('sha256:bundle');
+    const { subplans: _s, bundle_digest: _b, ...plain } = dto;
+    const parentOnly = canvasDocumentFromProposalDto(plain);
+    expect('subplans' in parentOnly || 'bundle_digest' in parentOnly).toBe(false);
+  });
+
+  it("opens a sub-plan as its own canvas, saved on its own and approved with the parent's hook", () => {
+    const parent = canvasDocumentFromProposalDto(dto);
+    const eu = subplanCanvasDocument(parent, 'eu');
+    expect(eu).not.toBeNull();
+    expect(eu?.plan.steps).toEqual(subplanProposal.plan.steps);
+    expect(eu?.proposal_digest).toBe('sha256:eu');
+    expect(eu?.save.path).toBe('/v1/runs/run-1/subplans/eu/plan-edits');
+    expect([eu?.subplan, eu?.plan_origin, eu?.last_edit_revision]).toEqual(['eu', 'human_edit', 2]);
+    expect(eu?.approval.token).toBe('tok');
+    // Not yet planned, or not a sub-plan of this plan: nothing to open.
+    expect(subplanCanvasDocument(parent, 'us')).toBeNull();
+    expect(subplanCanvasDocument(parent, 'apac')).toBeNull();
+    expect(canvasForView(dto, 'us').subplan).toBeUndefined();
+    expect(canvasForView(dto, 'eu').subplan).toBe('eu');
+  });
+
+  it("binds the approval to the parent proposal and the bundle from any of the run's canvases", () => {
+    const parent = canvasDocumentFromProposalDto(dto);
+    expect(hostApprovalBinding(parent)).toEqual({ proposalDigest: 'sha256:parent', bundleDigest: 'sha256:bundle' });
+    expect(hostApprovalBinding(canvasForView(dto, 'eu'))).toEqual({ proposalDigest: 'sha256:parent', bundleDigest: 'sha256:bundle' });
+    const { subplans: _s, bundle_digest: _b, ...plain } = dto;
+    expect(hostApprovalBinding(canvasDocumentFromProposalDto(plain))).toEqual({ proposalDigest: 'sha256:parent' });
   });
 });

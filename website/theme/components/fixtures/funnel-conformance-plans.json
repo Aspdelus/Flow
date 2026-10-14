@@ -1,5 +1,5 @@
 {
-  "source": "Orchestrator fixtures/conformance/funnel-conformance.json at bc0a30e: the Python oracle's (and, byte for byte, orchestrator-core's) plans these tests read, keyed by their index in that file's plans array.",
+  "source": "Orchestrator fixtures/conformance/funnel-conformance.json at bc0a30e: the Python oracle's (and, byte for byte, orchestrator-core's) plans these tests read, keyed by their index in that file's plans array; plans 23 (two sub-plans and a summary step) from the W26 sub-plan change.",
   "plans": {
     "0": {
       "plan": {
@@ -1245,6 +1245,110 @@
             "rationale": "收尾。",
             "schema_version": "host.plan-step.v1",
             "step_id": "publish",
+            "version": "1.0.0"
+          }
+        ],
+        "tenant_id": "tenant-conformance"
+      }
+    },
+    "23": {
+      "plan": {
+        "agent_refs": [
+          {
+            "agent_id": "tax.calculate",
+            "artifact_digest": "sha256:4ab57ea4eb19198b420d686f1ef9e93ae7e5da22c70a81e7a1cc5ec264595853",
+            "capabilities": ["calculation.execute", "tax.read"],
+            "code_release_ref": {
+              "artifact_digest": "sha256:6666666666666666666666666666666666666666666666666666666666666666",
+              "peeled_commit": "439cc740f2520806bb06f6d6391100c236be8d1f",
+              "protocol": "a3s.code.agent.v1",
+              "repository": "A3S-Lab/Code",
+              "tag": "v9.1.2",
+              "tree": "724e55c59d557cad8a236bbfa80ca63c08fdfe7c"
+            },
+            "definition_digest": "sha256:82a5f4ea5d7389061110f5328fb975c9b7e9335926a1103ebfe9fa145a7b00bf",
+            "io_protocols": ["a3s.agent.v1"],
+            "protocol": "a3s.agent.v1",
+            "provenance": {
+              "origin": {
+                "commit": "0123456789abcdef",
+                "path": "agents",
+                "repository": "https://github.com/example-org/fulfillment-agents"
+              },
+              "source_digest": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+              "source_ref": "conformance/catalog.jsonl"
+            },
+            "requires_model_class": "deterministic",
+            "requires_tools": [],
+            "snapshot_generation": "sha256:6477d0815ce40363b0dd28fe8d2ad0ed2ddcd6717f529dc6f4a2fd4d89c30c0e",
+            "tenant_id": "tenant-conformance",
+            "version": "1.0.0"
+          }
+        ],
+        "candidate_set_digest": "sha256:12d3af3ace1a7def556d7d5fc31e1ca5c9d37af7ca2c571e280401b35f1a1b7c",
+        "catalog_snapshot_digest": "sha256:6477d0815ce40363b0dd28fe8d2ad0ed2ddcd6717f529dc6f4a2fd4d89c30c0e",
+        "decision": "needs_approval",
+        "edges": [
+          {
+            "from": "eu",
+            "output": "result",
+            "schema_version": "host.plan-edge.v1",
+            "to": "summary"
+          },
+          {
+            "from": "us",
+            "output": "result",
+            "schema_version": "host.plan-edge.v1",
+            "to": "summary"
+          }
+        ],
+        "effective_capabilities": ["tax.read"],
+        "execution_order": ["eu", "us", "summary"],
+        "permission_ceiling": [
+          "calculation.execute",
+          "inventory.read",
+          "shipping.quote",
+          "tax.read"
+        ],
+        "plan_digest": "sha256:701f1b7c6c97e8277f32918ae685df1a7da6079d28d9f8b6ef616d9e92d74411",
+        "plan_id": "701f1b7c6c97",
+        "reason_codes": [
+          "CAPABILITIES_WITHIN_CEILING",
+          "DEPENDENCIES_ACYCLIC",
+          "HUMAN_APPROVAL_REQUIRED",
+          "SHORTLIST_BOUND"
+        ],
+        "schema_version": "host.agent-plan.v2",
+        "selection_receipt_digest": "sha256:f7f3827417bf319d1e61a45499781d44c66befb89bfb152df094345f96ae9169",
+        "steps": [
+          {
+            "depends_on": [],
+            "inputs": ["task.order"],
+            "kind": "subplan",
+            "objective": "评估这批订单在欧盟市场的税费与物流方案",
+            "rationale": "欧盟部分需要单独规划。",
+            "schema_version": "host.plan-step.v1",
+            "step_id": "eu"
+          },
+          {
+            "depends_on": [],
+            "inputs": ["task.order"],
+            "kind": "subplan",
+            "objective": "评估这批订单在美国市场的税费与物流方案",
+            "rationale": "美国部分需要单独规划。",
+            "schema_version": "host.plan-step.v1",
+            "step_id": "us"
+          },
+          {
+            "agent_id": "tax.calculate",
+            "capabilities": ["tax.read"],
+            "depends_on": [],
+            "inputs": ["eu.result", "us.result"],
+            "objective": "汇总两个市场的结论",
+            "outputs": ["report"],
+            "rationale": "汇总。",
+            "schema_version": "host.plan-step.v1",
+            "step_id": "summary",
             "version": "1.0.0"
           }
         ],

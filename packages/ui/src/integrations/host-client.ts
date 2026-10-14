@@ -50,6 +50,8 @@ export type FlowApprovalRecord = {
   approved: boolean;
   approved_at_utc: string;
   expires_at_utc: string;
+  /** Set when the plan has sub-plans: the bundle the reviewer approved. */
+  bundle_digest?: string;
   approval_digest: string;
 };
 
@@ -94,6 +96,11 @@ export type HostComposeProgressFrame = {
  * suspends, so the browser can drive Approve through the existing
  * issueApprovalRecord/resumeHook path unchanged.
  */
+/** Whether the planner may split a task into sub-plans, chosen with the task
+ * (W26): `auto` leaves it to the planner, `encouraged` asks for them where a
+ * part needs several steps of its own, `forbidden` is enforced by the host. */
+export type HostSubplanMode = 'auto' | 'encouraged' | 'forbidden';
+
 export type FlowTaskEnvelope = {
   task_text: string;
   permission_ceiling: string[];
@@ -101,6 +108,8 @@ export type FlowTaskEnvelope = {
   forbidden_capabilities?: string[];
   protocols?: string[];
   limit?: number;
+  /** Absent means `auto`. */
+  subplans?: HostSubplanMode;
   approval_token: string;
 };
 
@@ -197,6 +206,8 @@ function formatUtc(date: Date): string {
 /** Issue `host.flow-approval.v1` with a digest over the body without approval_digest. */
 export async function issueApprovalRecord(input: {
   proposalDigest: string;
+  /** A plan with sub-plans is approved as one bundle (`hostApprovalBinding`). */
+  bundleDigest?: string;
   tenantId: string;
   principalRef: string;
   approved: boolean;
@@ -213,6 +224,7 @@ export async function issueApprovalRecord(input: {
     approved: input.approved,
     approved_at_utc: formatUtc(approvedAt),
     expires_at_utc: formatUtc(new Date(approvedAt.getTime() + ttlMs)),
+    ...(input.bundleDigest ? { bundle_digest: input.bundleDigest } : {}),
   };
   const approval_digest = await sha256Digest(body);
   return { ...body, approval_digest };
@@ -430,7 +442,33 @@ export class FlowHostClient {
     editRevision: number,
   ): Promise<{ status: number; json: JsonObject }> {
     const body = planEditBodyFromCanvas(canvas, editRevision);
+    if (canvas.subplan) return this.postSubplanEdits(canvas.run_id, canvas.subplan, body);
     return this.postPlanEdits(canvas.run_id, body);
+  }
+
+  /** `POST /v1/runs/{run_id}/subplans/{subplan_id}/plan-edits` -- an edit of one
+   * sub-plan before the bundle is approved; answers like `postPlanEdits`. */
+  async postSubplanEdits(
+    runId: string,
+    subplanId: string,
+    body: JsonObject,
+  ): Promise<{ status: number; json: JsonObject }> {
+    if (!runId.trim() || !subplanId.trim()) {
+      throw new HostClientError('INVALID_INPUT: runId and subplanId are required');
+    }
+    try {
+      const { status, json } = await this.request(
+        'POST',
+        `/v1/runs/${encodeURIComponent(runId)}/subplans/${encodeURIComponent(subplanId)}/plan-edits`,
+        body,
+      );
+      return { status, json: (json ?? {}) as JsonObject };
+    } catch (error) {
+      if (error instanceof HostClientError && error.status !== undefined) {
+        return { status: error.status, json: (error.body ?? {}) as JsonObject };
+      }
+      throw error;
+    }
   }
 
   /**

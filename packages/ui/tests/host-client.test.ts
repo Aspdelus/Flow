@@ -1266,6 +1266,54 @@ describe('FlowHostClient', () => {
     );
   });
 
+  it('issues a bundle approval the host verifies, and no bundle field without one', async () => {
+    const approvedAt = new Date('2026-09-15T12:00:00.000Z');
+    const record = await issueApprovalRecord({
+      proposalDigest: 'sha256:abc',
+      bundleDigest: 'sha256:bundle',
+      tenantId: 'tenant-a',
+      principalRef: 'reviewer@local',
+      approved: true,
+      approvedAt,
+      ttlMs: 30 * 60 * 1000,
+    });
+    expect(record.bundle_digest).toBe('sha256:bundle');
+    // The digest orchestrator's ApprovalRecord (Rust and Python) computes for this body.
+    expect(record.approval_digest).toBe(
+      'sha256:68551e2f25542fef7f1e50ed289fbda46977759027a723e9b6b28545e736e7a3',
+    );
+    const plain = await issueApprovalRecord({
+      proposalDigest: 'sha256:abc',
+      tenantId: 'tenant-a',
+      principalRef: 'reviewer@local',
+      approved: true,
+      approvedAt,
+    });
+    expect('bundle_digest' in plain).toBe(false);
+  });
+
+  it("saves a sub-plan's canvas through its own plan-edits route", async () => {
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      expect(String(input)).toBe('http://127.0.0.1:9/v1/runs/run-1/subplans/eu/plan-edits');
+      expect(JSON.parse(String(init?.body)).edit_revision).toBe(3);
+      return new Response(JSON.stringify({ decision: { status: 'REVALIDATED' } }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    });
+    const client = new FlowHostClient({
+      baseUrl: 'http://127.0.0.1:9',
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    });
+    const canvas = canvasDocumentFromProposalDto({
+      run_id: 'run-1',
+      proposal: { plan: { steps: [{ step_id: 'audit', agent_id: 'a', objective: 'audit', depends_on: [] }], edges: [], execution_order: ['audit'] } },
+    });
+    const result = await client.saveCanvas({ ...canvas, subplan: 'eu' }, 3);
+    expect(result.status).toBe(200);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
   it('issues approval records with a stable digest', async () => {
     const approvedAt = new Date('2026-09-15T12:00:00.000Z');
     const record = await issueApprovalRecord({

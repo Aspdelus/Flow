@@ -9,11 +9,13 @@ import {
   type HostPlanProblem,
   type HostPlanStepNode,
   type HostRecoveryFailure,
+  type HostSubplanMode,
   type JsonObject,
   applyCanvasNodeEdits,
   createA3SFlowExpression,
   planCheckProblems,
   canvasDocumentFromProposalDto,
+  canvasForView,
   createA3SFlowDagNodeCatalog,
   FlowHostClient,
   gateRequestFromDto,
@@ -159,8 +161,14 @@ export async function submitNewRun(
   config: HostModeConfig,
   taskText: string,
   permissionCeiling: string[],
+  subplans: HostSubplanMode = 'auto',
 ): Promise<string> {
-  const { runId, started } = beginNewRun(config, taskText, permissionCeiling);
+  const { runId, started } = beginNewRun(
+    config,
+    taskText,
+    permissionCeiling,
+    subplans,
+  );
   await started;
   return runId;
 }
@@ -184,6 +192,7 @@ export function beginNewRun(
   config: HostModeConfig,
   taskText: string,
   permissionCeiling: string[],
+  subplans: HostSubplanMode = 'auto',
 ): { runId: string; started: Promise<void> } {
   const trimmed = taskText.trim();
   if (!trimmed) {
@@ -194,6 +203,8 @@ export function beginNewRun(
   const envelope: FlowTaskEnvelope = {
     task_text: trimmed,
     permission_ceiling: permissionCeiling,
+    // `auto` is the host's default, so it is not sent.
+    ...(subplans === 'auto' ? {} : { subplans }),
     approval_token: mintApprovalToken(),
   };
   const started = client.startRun(runId, envelope).then(({ status, json }) => {
@@ -493,6 +504,9 @@ const GATE_HOOK_ID = /^gate:(.+)$/;
 const BODY_FLOW_STEP_ID = /^agent:(.+)[@#](\d+)$/;
 const ITERATION_FLOW_STEP_ID = /^iter:(.+?)(\.results)?$/;
 const LOOP_FLOW_STEP_ID = /^loop:(.+?)(@\d+)?$/;
+// A sub-plan's steps run in the parent run under its prefix (`agent:<id>/<step>`)
+// and `subplan:<id>` records how it ended (adapters/flow-host/src/subplan.rs).
+const SUBPLAN_FLOW_STEP_ID = /^subplan:(.+)$/;
 // Upper bound of a condition's cases (orchestrator-core CONDITION_CASE_LIMIT):
 // every case node of the chain (hostConditionNodeIds) shares one status.
 const CONDITION_CASE_LIMIT = 8;
@@ -635,6 +649,45 @@ export function hostRunExecutionFromSnapshot(
       items === 'success' ? 'success' : nodeStatus;
     if (nodeStatus === 'success') completedStepCount += 1;
   }
+  // A sub-plan node runs while any of its steps do and ends with `subplan:<id>`.
+  const subplanSkipped: string[] = [];
+  for (const [flowStepId, step] of Object.entries(steps)) {
+    const match = SUBPLAN_FLOW_STEP_ID.exec(flowStepId);
+    if (!match || !isRecord(step) || typeof step.status !== 'string') continue;
+    const ended =
+      isRecord(step.output) && typeof step.output.status === 'string'
+        ? step.output.status
+        : '';
+    const nodeStatus =
+      step.status.toLowerCase() === 'completed' &&
+      ended &&
+      ended !== 'completed'
+        ? 'error'
+        : nodeStatusFromFlowStepStatus(step.status);
+    nodeStatuses[match[1]] = nodeStatus;
+    if (nodeStatus === 'success') completedStepCount += 1;
+    if (nodeStatus === 'error') failedStepCount += 1;
+    // Its own skipped steps, already under its prefix.
+    if (isRecord(step.output) && Array.isArray(step.output.skipped_steps)) {
+      subplanSkipped.push(
+        ...step.output.skipped_steps.filter(
+          (id): id is string => typeof id === 'string',
+        ),
+      );
+    }
+  }
+  for (const stepId of Object.keys(nodeStatuses)) {
+    const owner = stepId.includes('/')
+      ? stepId.slice(0, stepId.indexOf('/'))
+      : '';
+    if (
+      owner &&
+      !(owner in nodeStatuses) &&
+      nodeStatuses[stepId] === 'running'
+    ) {
+      nodeStatuses[owner] = 'running';
+    }
+  }
   let openGateStepId: string | null = null;
   const hooks = isRecord(record.hooks) ? record.hooks : {};
   for (const [hookId, hook] of Object.entries(hooks)) {
@@ -657,9 +710,14 @@ export function hostRunExecutionFromSnapshot(
       : null;
   if (planFailure) nodeStatuses[planFailure[1]] = 'error';
   const output = isRecord(record.output) ? record.output : {};
-  const skippedStepIds = Array.isArray(output.skipped_steps)
-    ? output.skipped_steps.filter((id): id is string => typeof id === 'string')
-    : [];
+  const skippedStepIds = [
+    ...(Array.isArray(output.skipped_steps)
+      ? output.skipped_steps.filter(
+          (id): id is string => typeof id === 'string',
+        )
+      : []),
+    ...subplanSkipped,
+  ];
   runningStepIds.sort();
   if (latest.size > 0) nodeStatuses.start = 'success';
   if (status === 'completed') nodeStatuses.done = 'success';
@@ -672,6 +730,43 @@ export function hostRunExecutionFromSnapshot(
     runningStepIds,
     skippedStepIds,
     openGateStepId,
+    completedStepCount,
+    failedStepCount,
+  };
+}
+
+/** The run's execution as sub-plan `subplanId`'s canvas shows it: its own
+ * steps without their `<id>/` prefix (the parent plan's are not on it). */
+export function hostRunExecutionForSubplan(
+  execution: HostRunExecution,
+  subplanId: string,
+): HostRunExecution {
+  const prefix = `${subplanId}/`;
+  const local = (ids: string[]) =>
+    ids
+      .filter((id) => id.startsWith(prefix))
+      .map((id) => id.slice(prefix.length));
+  const nodeStatuses: Record<string, HostNodeRuntimeStatus> = {};
+  for (const [id, status] of Object.entries(execution.nodeStatuses)) {
+    if (id.startsWith(prefix)) nodeStatuses[id.slice(prefix.length)] = status;
+  }
+  // Its own counts, against its own number of steps on the canvas.
+  const counted = Object.values(nodeStatuses);
+  const completedStepCount = counted.filter(
+    (status) => status === 'success',
+  ).length;
+  const failedStepCount = counted.filter((status) => status === 'error').length;
+  const own = execution.nodeStatuses[subplanId];
+  if (Object.keys(nodeStatuses).length > 0) nodeStatuses.start = 'success';
+  if (own === 'success') nodeStatuses.done = 'success';
+  else if (own === 'error') nodeStatuses.done = 'error';
+  const gate = execution.openGateStepId;
+  return {
+    ...execution,
+    nodeStatuses,
+    runningStepIds: local(execution.runningStepIds),
+    skippedStepIds: local(execution.skippedStepIds),
+    openGateStepId: gate?.startsWith(prefix) ? gate.slice(prefix.length) : null,
     completedStepCount,
     failedStepCount,
   };
@@ -1023,6 +1118,20 @@ function hostFailTitle(locale: FlowWebsiteLocale): string {
   return locale === 'zh' ? '终止' : 'Stop';
 }
 
+/** A sub-plan node's title: how many steps its own plan has, once planned. */
+function hostSubplanTitle(
+  locale: FlowWebsiteLocale,
+  canvas: HostCanvasDocument,
+  stepId: string,
+): string {
+  const plan = canvas.subplans?.find((view) => view.step_id === stepId)
+    ?.proposal?.plan as JsonObject | undefined;
+  const count = Array.isArray(plan?.steps) ? plan.steps.length : null;
+  if (locale === 'zh')
+    return count === null ? '子计划' : `子计划 · ${count} 步`;
+  return count === null ? 'Sub-plan' : `Sub-plan · ${count} steps`;
+}
+
 function hostApprovalTitle(locale: FlowWebsiteLocale): string {
   return locale === 'zh' ? '人工审批' : 'Human approval';
 }
@@ -1255,6 +1364,28 @@ export function graphFromHostCanvas(
       );
       markHost(node, step);
       typeOf.set(stepId, 'flow.fail');
+      nodes.push(node);
+      return;
+    }
+    // A sub-plan has a plan of its own (open it with the sub-plan switcher);
+    // here it is one node that ends when that plan does.
+    if (step.kind === 'subplan') {
+      const node = createPlaygroundNode(
+        stepId,
+        'flow.child-workflow',
+        { x: 0, y: 0 },
+        locale,
+        {
+          configuration: {
+            title: hostSubplanTitle(locale, canvas, stepId),
+            desc: objective,
+            child_id: stepId,
+          },
+          registry,
+        },
+      );
+      markHost(node, step);
+      typeOf.set(stepId, 'flow.child-workflow');
       nodes.push(node);
       return;
     }
@@ -1556,10 +1687,13 @@ export function hostStepEditorKind(
   return null;
 }
 
-/** Every `<step>.<port>` an agent step on the canvas produces. */
+/** Every `<step>.<port>` an agent step -- or a sub-plan (its result and
+ * status) -- on the canvas produces. */
 export function hostStepOutputOptions(graph: PlaygroundGraphState): string[] {
   return graph.nodes.flatMap((node) => {
     const step = node.data.hostPlanStep as JsonObject | undefined;
+    if (step?.kind === 'subplan')
+      return [`${node.id}.result`, `${node.id}.status`];
     if (!step || (step.kind ?? 'agent') !== 'agent') return [];
     return hostStringItems(step.outputs).map((port) => `${node.id}.${port}`);
   });
@@ -1701,6 +1835,8 @@ const HOST_CONTROL_NODE_KINDS: Readonly<Record<string, string>> = {
   'flow.condition': 'condition',
   'flow.hook': 'approval',
   'flow.fail': 'fail',
+  // A sub-workflow from the library is a sub-plan: the host plans it on save (W26).
+  'flow.child-workflow': 'subplan',
 };
 
 function hostNodeType(node: PlaygroundNode): string {
@@ -1789,7 +1925,13 @@ export function hostCanvasFromGraph(
   const outputsOf = new Map<string, string[]>();
   for (const node of graph.nodes) {
     const step = planStepOf(node);
-    if (step) outputsOf.set(node.id, hostStringItems(step.outputs));
+    // A sub-plan's ports are implicit, like a loop's.
+    if (step) {
+      outputsOf.set(
+        node.id,
+        step.kind === 'subplan' ? ['result', 'status'] : hostStringItems(step.outputs),
+      );
+    }
   }
   const targetsOf = (
     nodeId: string,
@@ -1864,6 +2006,10 @@ export function hostCanvasFromGraph(
     } else if (kind === 'approval' && fresh) {
       // What the reviewer checks: every output of the steps wired into the gate.
       step.inputs = upstreamOutputs(node.id);
+    } else if (kind === 'subplan' && fresh) {
+      // What the sub-plan works from: every output wired into it, else the task.
+      const read = upstreamOutputs(node.id);
+      step.inputs = read.length > 0 ? read : ['task.goal'];
     }
     // Depends-on comes from the canvas's own edges, not the possibly-stale
     // `hostPlanStep.depends_on` cached on the node -- this is what makes a
@@ -1996,8 +2142,35 @@ export function addHostPlanStep(
   };
 }
 
-export function refreshCanvasFromProposalDto(dto: unknown): HostCanvasDocument {
-  return canvasDocumentFromProposalDto(dto);
+/** The canvas for a fresh proposal DTO: the parent plan, or the sub-plan the
+ * operator is looking at (`subplanId`) while the plan still has it. */
+export function refreshCanvasFromProposalDto(
+  dto: unknown,
+  subplanId: string | null = null,
+): HostCanvasDocument {
+  return canvasForView(dto, subplanId);
+}
+
+/** The plans of a run the operator can switch the canvas between: the
+ * parent, then each sub-plan (`ready` once it is planned). `null` for a plan
+ * without sub-plans. */
+export function hostPlanViews(
+  canvas: HostCanvasDocument | null,
+  locale: FlowWebsiteLocale,
+): { id: string | null; label: string; ready: boolean }[] | null {
+  if (!canvas?.subplans?.length) return null;
+  return [
+    {
+      id: null,
+      label: locale === 'zh' ? '父计划' : 'Parent plan',
+      ready: true,
+    },
+    ...canvas.subplans.map((view) => ({
+      id: view.step_id,
+      label: `${locale === 'zh' ? '子计划' : 'Sub-plan'} ${view.step_id}`,
+      ready: view.proposal !== null,
+    })),
+  ];
 }
 
 /** A host finding about a suggestion (`refused`, or one of `warnings`). */
