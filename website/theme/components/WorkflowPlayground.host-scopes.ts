@@ -4,11 +4,13 @@ import {
   type HostPlanStepNode,
   type JsonObject,
   applyCanvasNodeEdits,
+  subplanCanvasDocument,
 } from '@a3s-lab/flow-ui';
 import type { FlowWebsiteLocale } from './flow-node-catalog';
 import {
   graphFromHostCanvas,
-  hostCanvasFromGraph,
+  hostScopedSubplanSteps,
+  hostWorkingCanvas,
 } from './WorkflowPlayground.host';
 import type { PlaygroundGraphState } from './WorkflowPlayground.model';
 
@@ -482,6 +484,34 @@ export function hostScopeSteps(
 }
 
 /** Plan steps -> canvas nodes, binding fields only on agent steps. */
+/**
+ * A new sub-plan as a plan step a save can carry: it reads the plan's last
+ * top-level agent output (else the task) and gets a placeholder sub-task for
+ * the operator to write; on save the host plans it from that sub-task.
+ */
+export function hostSubplanStepAdded(
+  canvas: HostCanvasDocument,
+  locale: FlowWebsiteLocale,
+): { steps: JsonObject[]; stepId: string } {
+  const steps = Array.isArray(canvas.plan.steps)
+    ? (canvas.plan.steps as JsonObject[])
+    : [];
+  const topLevel = steps.filter((step) => !hostScopeOf(steps, idOf(step)));
+  const upstream = topLevel.filter(isAgent).flatMap(portsOf).at(-1);
+  const stepId = freshId(new Set(steps.map(idOf)), 'subplan');
+  const step: JsonObject = {
+    step_id: stepId,
+    kind: 'subplan',
+    objective:
+      locale === 'zh'
+        ? '新的子任务：写明这一部分要做什么'
+        : 'New sub-task: say what this part is to do',
+    inputs: [upstream ?? 'task.goal'],
+    depends_on: [],
+  };
+  return { steps: [...steps, step], stepId };
+}
+
 function stepNodes(steps: readonly JsonObject[]): HostPlanStepNode[] {
   return steps.map((step) => {
     const node: HostPlanStepNode = {
@@ -501,7 +531,10 @@ function stepNodes(steps: readonly JsonObject[]): HostPlanStepNode[] {
 
 /**
  * Apply `edit` to the plan steps as the canvas has them now (unsaved canvas
- * edits included) and redraw.  Throws the canvas's own error when the result
+ * edits included) and redraw.  `edit` sees the parent plan's steps followed by
+ * every planned sub-plan's under its `<id>/` prefix (as the canvas draws
+ * them), and each comes back to its own plan; a sub-plan none of whose steps
+ * come back is left as it was.  Throws the canvas's own error when the result
  * is not a plan it can carry (e.g. a cycle).
  */
 export function hostEditPlanSteps(
@@ -511,10 +544,46 @@ export function hostEditPlanSteps(
   catalog: A3SFlowDagNodeCatalog,
   edit: (steps: JsonObject[], current: HostCanvasDocument) => JsonObject[],
 ): { canvas: HostCanvasDocument; graph: PlaygroundGraphState } {
-  const current = hostCanvasFromGraph(canvas, graph);
-  const steps = Array.isArray(current.plan.steps)
+  const current = hostWorkingCanvas(canvas, graph);
+  const parentSteps = Array.isArray(current.plan.steps)
     ? (current.plan.steps as JsonObject[])
     : [];
-  const next = applyCanvasNodeEdits(current, stepNodes(edit(steps, current)));
+  const subplans = (current.subplans ?? []).flatMap((view) => {
+    const steps = (view.proposal?.plan as JsonObject | undefined)?.steps;
+    return Array.isArray(steps)
+      ? [
+          {
+            id: view.step_id,
+            steps: hostScopedSubplanSteps(steps as JsonObject[], view.step_id),
+          },
+        ]
+      : [];
+  });
+  const edited = edit(
+    [...parentSteps, ...subplans.flatMap((sub) => sub.steps)],
+    current,
+  );
+  const ownerOf = (step: JsonObject) =>
+    subplans.find((sub) => idOf(step).startsWith(`${sub.id}/`))?.id;
+  let next = applyCanvasNodeEdits(
+    current,
+    stepNodes(edited.filter((step) => !ownerOf(step))),
+  );
+  if (next.subplans) {
+    next = {
+      ...next,
+      subplans: next.subplans.map((view) => {
+        const own = edited.filter((step) => ownerOf(step) === view.step_id);
+        const sub =
+          own.length > 0 ? subplanCanvasDocument(current, view.step_id) : null;
+        if (!sub || !view.proposal) return view;
+        const plan = applyCanvasNodeEdits(
+          sub,
+          stepNodes(hostScopedSubplanSteps(own, view.step_id, 'local')),
+        ).plan;
+        return { ...view, proposal: { ...view.proposal, plan } };
+      }),
+    };
+  }
   return { canvas: next, graph: graphFromHostCanvas(next, locale, catalog) };
 }

@@ -26,9 +26,15 @@ import {
   hostConditionChain,
   hostConditionInput,
   hostOtherwiseTargets,
-  hostPlanViews,
+  hostPlanSignature,
+  hostPlanStepCount,
+  hostSavePlan,
+  hostScopeGraph,
+  hostScopedSubplanSteps,
+  hostSubplanCanvasFromGraph,
+  hostSubplanOfNode,
+  hostWorkingCanvas,
   hostRewireOtherwise,
-  hostRunExecutionForSubplan,
   hostRunExecutionFromSnapshot,
   hostStepOutputOptions,
   hostUnsavedNodes,
@@ -1462,13 +1468,15 @@ describe('WorkflowPlayground host mode', () => {
 
   it('beginNewRun sends the sub-plan choice made with the task, and nothing for auto', async () => {
     const bodies: Record<string, unknown>[] = [];
-    const fetchImpl = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
-      bodies.push(JSON.parse(String(init?.body)));
-      return new Response(JSON.stringify({ status: 'suspended' }), {
-        status: 200,
-        headers: { 'Content-Type': 'application/json' },
-      });
-    });
+    const fetchImpl = vi.fn(
+      async (_input: RequestInfo | URL, init?: RequestInit) => {
+        bodies.push(JSON.parse(String(init?.body)));
+        return new Response(JSON.stringify({ status: 'suspended' }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      },
+    );
     vi.stubGlobal('fetch', fetchImpl);
     try {
       const config = {
@@ -1480,7 +1488,11 @@ describe('WorkflowPlayground host mode', () => {
       await beginNewRun(config, 'a task', ['read'], 'forbidden').started;
       await beginNewRun(config, 'a task', ['read'], 'encouraged').started;
       await beginNewRun(config, 'a task', ['read']).started;
-      expect(bodies.map((body) => body.subplans)).toEqual(['forbidden', 'encouraged', undefined]);
+      expect(bodies.map((body) => body.subplans)).toEqual([
+        'forbidden',
+        'encouraged',
+        undefined,
+      ]);
       expect('subplans' in bodies[2]).toBe(false);
     } finally {
       vi.unstubAllGlobals();
@@ -2229,24 +2241,36 @@ describe('WorkflowPlayground host mode: editing control flow on the canvas', () 
     expect(route.inputs).toEqual(['inventory.stock']);
   });
 
-  it('turns a sub-workflow dragged in from the library into a sub-plan step', () => {
+  it('turns a group dragged in from the library into a sub-plan step', () => {
     const document = canvasOf(fixture.plans[0].plan);
     const graph = graphFromHostCanvas(document, 'zh', hostCatalog());
     const child = (id: string, desc: string) =>
-      createPlaygroundNode(id, 'flow.child-workflow', { x: 0, y: 0 }, 'zh', {
-        configuration: { title: '子计划', desc, child_id: id },
+      createPlaygroundNode(id, 'group', { x: 0, y: 0 }, 'zh', {
+        configuration: { title: '子计划', desc, start_node_id: `${id}~task` },
         registry: hostCatalog().registry,
       });
     const next = {
       ...graph,
-      nodes: [...graph.nodes, child('child_1', '评估欧盟市场'), child('child_2', '评估美国市场')],
+      nodes: [
+        ...graph.nodes,
+        child('child_1', '评估欧盟市场'),
+        child('child_2', '评估美国市场'),
+      ],
       edges: [...graph.edges, wire('inventory', 'success', 'child_1')],
     };
     expect(hostUnsavedNodes(next)).toEqual([]);
     const saved = hostCanvasFromGraph(document, next);
     // It works from what is wired into it, else from the task.
-    expect(stepOf(saved, 'child_1')).toMatchObject({ kind: 'subplan', objective: '评估欧盟市场', inputs: ['inventory.stock'] });
-    expect(stepOf(saved, 'child_2')).toMatchObject({ kind: 'subplan', objective: '评估美国市场', inputs: ['task.goal'] });
+    expect(stepOf(saved, 'child_1')).toMatchObject({
+      kind: 'subplan',
+      objective: '评估欧盟市场',
+      inputs: ['inventory.stock'],
+    });
+    expect(stepOf(saved, 'child_2')).toMatchObject({
+      kind: 'subplan',
+      objective: '评估美国市场',
+      inputs: ['task.goal'],
+    });
     expect(stepOf(saved, 'child_1').agent_id).toBeUndefined();
   });
 
@@ -2812,19 +2836,55 @@ describe('WorkflowPlayground host mode: sub-plans (W26)', () => {
     ),
   ) as { plans: Record<number, { plan: Record<string, unknown> }> };
   const plan = fixture.plans[23].plan;
-  const subplan = (stepIds: string[]) => ({
-    proposal_digest: 'sha256:sub',
-    plan: {
-      steps: stepIds.map((step_id) => ({
-        step_id,
-        agent_id: 'frontend-developer',
-        objective: step_id,
-        depends_on: [],
-      })),
-      edges: [],
-      execution_order: stepIds,
-    },
+  const agent = (
+    step_id: string,
+    inputs: string[],
+    outputs: string[],
+    extra: Record<string, unknown> = {},
+  ) => ({
+    schema_version: 'host.plan-step.v1',
+    step_id,
+    agent_id: 'tax.calculate',
+    version: '1.0.0',
+    objective: `${step_id} the EU part`,
+    capabilities: ['tax.read'],
+    inputs,
+    outputs,
+    depends_on: [],
+    ...extra,
   });
+  // The EU sub-plan: an audit, a condition on it, and two branches.
+  const euSteps = [
+    agent('audit', ['task.order'], ['report']),
+    {
+      schema_version: 'host.plan-step.v1',
+      step_id: 'route',
+      kind: 'condition',
+      objective: 'Is the audit clean?',
+      inputs: ['audit.report'],
+      cases: [{ label: 'clean', then: ['ship'] }],
+      otherwise: ['fixes'],
+      depends_on: [],
+    },
+    agent('fixes', ['audit.report'], ['patch']),
+    agent('ship', ['audit.report'], ['note']),
+  ];
+  const subplanProposal = (steps: Record<string, unknown>[]) => {
+    const canvas = applyCanvasNodeEdits(
+      canvasDocumentFromProposalDto({
+        run_id: 'x',
+        proposal: { plan: { steps: [] } },
+      }),
+      steps.map((step) => ({
+        id: String(step.step_id),
+        kind: 'host.plan-step.v1',
+        objective: step.objective,
+        depends_on: step.depends_on as string[],
+        plan_step: step,
+      })),
+    );
+    return { proposal_digest: 'sha256:eu', plan: canvas.plan };
+  };
   const canvas = () =>
     canvasDocumentFromProposalDto({
       run_id: 'run-sub',
@@ -2837,111 +2897,342 @@ describe('WorkflowPlayground host mode: sub-plans (W26)', () => {
         {
           step_id: 'eu',
           proposal_digest: 'sha256:eu',
-          proposal: subplan(['audit', 'fixes']),
+          proposal: subplanProposal(euSteps),
+          last_edit_revision: 2,
         },
         { step_id: 'us', proposal: null },
       ],
     });
+  const nodeOf = (graph: { nodes: { id: string }[] }, id: string) =>
+    graph.nodes.find((node) => node.id === id) as
+      ReturnType<typeof createPlaygroundNode> | undefined;
 
-  it('draws a sub-plan as one child-workflow node and saves the plan unchanged', () => {
-    const document = canvas();
-    const graph = graphFromHostCanvas(document, 'zh', hostCatalog());
-    const eu = graph.nodes.find((node) => node.id === 'eu');
-    expect(eu?.data.dagNode.data.type).toBe('flow.child-workflow');
-    expect(eu?.data.dagNode.data.title).toBe('子计划 · 2 步');
-    expect(
-      graph.nodes.find((node) => node.id === 'us')?.data.dagNode.data.title,
-    ).toBe('子计划');
-    expect(
-      graph.edges.some(
-        (edge) => edge.source === 'eu' && edge.target === 'summary',
-      ),
-    ).toBe(true);
-    const saved = hostCanvasFromGraph(document, graph);
-    expect(JSON.parse(JSON.stringify(saved.plan.steps))).toEqual(plan.steps);
-    expect(saved.plan.edges).toEqual(plan.edges);
-    // A condition may route on how a sub-plan ended.
-    expect(hostStepOutputOptions(graph)).toEqual(
-      expect.arrayContaining(['eu.result', 'eu.status', 'us.status']),
-    );
-    // A gate dragged in after a sub-plan reviews what it produced.
-    const gate = createPlaygroundNode('hook_1', 'flow.hook', { x: 0, y: 0 }, 'zh', {
-      configuration: { title: '人工审批', desc: '看一眼欧盟结论' },
-      registry: hostCatalog().registry,
-    });
-    const nodes = [...graph.nodes, gate];
-    const withGate = {
-      ...graph,
-      nodes,
-      edges: [
-        ...graph.edges,
-        createPlaygroundEdge(
-          { source: 'eu', sourceHandle: 'completed', target: 'hook_1', targetHandle: 'in' },
-          nodes,
-          'zh',
-          hostCatalog().registry,
-        ),
-      ],
-    };
-    const gated = hostCanvasFromGraph(document, withGate);
-    const gateStep = (gated.plan.steps as Record<string, unknown>[]).find(
-      (step) => step.step_id === 'hook_1',
-    );
-    expect(gateStep?.inputs).toEqual(['eu.result', 'eu.status']);
-  });
-
-  it('lists the plans the canvas can show, a sub-plan once it is planned', () => {
-    expect(hostPlanViews(canvas(), 'zh')).toEqual([
-      { id: null, label: '父计划', ready: true },
-      { id: 'eu', label: '子计划 eu', ready: true },
-      { id: 'us', label: '子计划 us', ready: false },
+  it('draws each sub-plan as a group holding its own plan, under its prefix', () => {
+    const graph = graphFromHostCanvas(canvas(), 'zh', hostCatalog());
+    const eu = nodeOf(graph, 'eu');
+    expect(eu?.data.dagNode.data.type).toBe('group');
+    expect(eu?.data.dagNode.data.title).toBe('子计划 · 4 步');
+    expect(eu?.data.container).toBe(true);
+    // Its sub-task starts it; its steps are named as the host runs them.
+    const start = nodeOf(graph, 'eu~task');
+    expect([start?.data.dagNode.data.type, start?.parentId]).toEqual([
+      'group-start',
+      'eu',
     ]);
+    for (const id of ['eu/audit', 'eu/route', 'eu/fixes', 'eu/ship']) {
+      expect(nodeOf(graph, id)?.parentId).toBe('eu');
+      expect(hostSubplanOfNode(graph, id)).toBe('eu');
+    }
     expect(
-      hostPlanViews(
-        canvasDocumentFromProposalDto({ run_id: 'r', proposal: { plan } }),
-        'zh',
-      ),
-    ).toBeNull();
-  });
-
-  it("shows a sub-plan's steps on its node in the parent and on its own canvas", () => {
+      (nodeOf(graph, 'eu/route')?.data.hostPlanStep as Record<string, unknown>)
+        .cases,
+    ).toEqual([{ label: 'clean', then: ['eu/ship'] }]);
+    const wired = (source: string, target: string) =>
+      graph.edges.some(
+        (edge) => edge.source === source && edge.target === target,
+      );
+    expect(wired('eu~task', 'eu/audit')).toBe(true);
+    expect(wired('eu/audit', 'eu/route')).toBe(true);
+    expect(wired('eu/route', 'eu/ship')).toBe(true);
+    // Nothing inside reaches the parent's done; the group itself goes on.
+    expect(wired('eu/ship', 'done') || wired('eu/fixes', 'done')).toBe(false);
+    expect(wired('eu', 'summary')).toBe(true);
+    // A sub-plan not planned yet holds a placeholder the save leaves out.
+    expect(nodeOf(graph, 'us')?.data.dagNode.data.title).toBe('子计划');
+    expect(nodeOf(graph, 'us~pending')?.parentId).toBe('us');
+    expect(hostUnsavedNodes(graph)).toEqual([]);
+    // The run's steps land on these nodes.
     const execution = hostRunExecutionFromSnapshot({
       status: 'suspended',
       steps: {
         'orchestrator.plan': { status: 'completed' },
         'agent:eu/audit': { status: 'completed' },
+        'cond:eu/route': { status: 'completed' },
         'agent:eu/fixes': { status: 'running' },
         'subplan:us': {
           status: 'completed',
           output: { status: 'rejected', skipped_steps: ['us/ship'] },
         },
       },
-      hooks: { 'gate:eu/signoff': { status: 'active' } },
     });
-    // The parent: eu runs while its steps do; us ended rejected.
-    expect(execution.nodeStatuses.eu).toBe('running');
-    expect(execution.nodeStatuses.us).toBe('error');
-    expect(execution.openGateStepId).toBe('eu/signoff');
-    expect(execution.skippedStepIds).toEqual(['us/ship']);
-    // eu's own canvas: its steps without the prefix.
-    const eu = hostRunExecutionForSubplan(execution, 'eu');
-    expect(eu.nodeStatuses).toEqual({
-      audit: 'success',
-      fixes: 'running',
-      signoff: 'waiting',
-      start: 'success',
-    });
-    expect([eu.runningStepIds, eu.openGateStepId]).toEqual([
-      ['fixes'],
-      'signoff',
-    ]);
-    // Counted against its own steps, not the whole run's.
-    expect([eu.completedStepCount, eu.failedStepCount]).toEqual([1, 0]);
-    const us = hostRunExecutionForSubplan(execution, 'us');
+    const statuses = execution.nodeStatuses;
     expect([
-      us.skippedStepIds,
-      us.nodeStatuses.done,
-      us.openGateStepId,
-    ]).toEqual([['ship'], 'error', null]);
+      statuses.eu,
+      statuses['eu/audit'],
+      statuses['eu/route'],
+      statuses['eu/fixes'],
+      statuses.us,
+    ]).toEqual(['running', 'success', 'success', 'running', 'error']);
+    for (const id of ['eu/audit', 'eu/route', 'eu/fixes'])
+      expect(nodeOf(graph, id)).toBeDefined();
+    expect(hostPlanStepCount(canvas())).toBe(3 + 4);
+  });
+
+  it('saves the parent and each sub-plan unchanged when nothing was edited', () => {
+    const document = canvas();
+    const graph = graphFromHostCanvas(document, 'zh', hostCatalog());
+    const saved = hostCanvasFromGraph(document, graph);
+    expect(JSON.parse(JSON.stringify(saved.plan.steps))).toEqual(plan.steps);
+    expect(saved.plan.edges).toEqual(plan.edges);
+    const eu = hostSubplanCanvasFromGraph(document, graph, 'eu');
+    expect(eu?.subplan).toBe('eu');
+    expect(eu?.save.path).toBe('/v1/runs/run-sub/subplans/eu/plan-edits');
+    expect(JSON.parse(JSON.stringify(eu?.plan.steps))).toEqual(
+      subplanProposal(euSteps).plan.steps,
+    );
+    expect(hostSubplanCanvasFromGraph(document, graph, 'us')).toBeNull();
+    expect(hostPlanSignature(hostWorkingCanvas(document, graph))).toBe(
+      hostPlanSignature(document),
+    );
+  });
+
+  it("saves an edit inside a sub-plan as that sub-plan's, out of its prefix", () => {
+    const document = canvas();
+    const graph = graphFromHostCanvas(document, 'zh', hostCatalog());
+    // Retitle a step, and have the clean branch run after the fixes too.
+    const nodes = graph.nodes.map((node) =>
+      node.id === 'eu/ship'
+        ? {
+            ...node,
+            data: {
+              ...node.data,
+              dagNode: {
+                ...node.data.dagNode,
+                data: { ...node.data.dagNode.data, desc: 'Ship the EU orders' },
+              },
+            },
+          }
+        : node,
+    );
+    const edited = {
+      ...graph,
+      nodes,
+      edges: [
+        ...graph.edges,
+        createPlaygroundEdge(
+          {
+            source: 'eu/fixes',
+            sourceHandle: 'success',
+            target: 'eu/ship',
+            targetHandle: 'in',
+          },
+          nodes,
+          'zh',
+          hostCatalog().registry,
+        ),
+      ],
+    };
+    const eu = hostSubplanCanvasFromGraph(document, edited, 'eu');
+    const ship = (eu?.plan.steps as Record<string, unknown>[]).find(
+      (step) => step.step_id === 'ship',
+    );
+    expect(ship).toMatchObject({
+      objective: 'Ship the EU orders',
+      inputs: ['audit.report'],
+      depends_on: ['fixes'],
+    });
+    // The parent plan is not touched, and the change shows as unsaved.
+    expect(
+      JSON.parse(
+        JSON.stringify(hostCanvasFromGraph(document, edited).plan.steps),
+      ),
+    ).toEqual(plan.steps);
+    expect(hostPlanSignature(hostWorkingCanvas(document, edited))).not.toBe(
+      hostPlanSignature(document),
+    );
+  });
+
+  it('splits a save into the parent edit and each edited sub-plan, refusing a mixed one', () => {
+    const document = canvas();
+    const graph = graphFromHostCanvas(document, 'zh', hostCatalog());
+    const saved = hostPlanSignature(document);
+    const retitle = (g: typeof graph, id: string, desc: string) => ({
+      ...g,
+      nodes: g.nodes.map((node) =>
+        node.id === id
+          ? {
+              ...node,
+              data: {
+                ...node.data,
+                dagNode: {
+                  ...node.data.dagNode,
+                  data: { ...node.data.dagNode.data, desc },
+                },
+              },
+            }
+          : node,
+      ),
+    });
+    const none = hostSavePlan(document, graph, saved, 'zh');
+    expect([
+      none.parentChanged,
+      none.replansSubplans,
+      none.subplanEdits,
+      none.refusal,
+    ]).toEqual([false, false, [], null]);
+    // A step inside eu: eu's own edit, under the revision after its last one.
+    const inner = hostSavePlan(
+      document,
+      retitle(graph, 'eu/ship', 'Ship it'),
+      saved,
+      'zh',
+    );
+    expect(
+      inner.subplanEdits.map(({ subplanId, revision }) => [
+        subplanId,
+        revision,
+      ]),
+    ).toEqual([['eu', 3]]);
+    expect(inner.subplanEdits[0].canvas.save.path).toBe(
+      '/v1/runs/run-sub/subplans/eu/plan-edits',
+    );
+    expect([inner.parentChanged, inner.replansSubplans, inner.refusal]).toEqual(
+      [false, false, null],
+    );
+    // eu's sub-task: a parent edit that has the host plan eu again.
+    const task = hostSavePlan(
+      document,
+      retitle(graph, 'eu', '只评估欧盟的物流'),
+      saved,
+      'zh',
+    );
+    expect([
+      task.parentChanged,
+      task.replansSubplans,
+      task.subplanEdits,
+    ]).toEqual([true, true, []]);
+    // Both at once would lose the inner edit: refused, nothing sent.
+    const both = hostSavePlan(
+      document,
+      retitle(retitle(graph, 'eu', '只评估欧盟的物流'), 'eu/ship', 'Ship it'),
+      saved,
+      'zh',
+    );
+    expect(both.refusal).toContain('子计划 eu');
+    // Once eu's edit is saved, the signature has it and it is not sent again.
+    const after = hostSavePlan(
+      document,
+      retitle(graph, 'eu/ship', 'Ship it'),
+      hostPlanSignature(
+        hostWorkingCanvas(document, retitle(graph, 'eu/ship', 'Ship it')),
+      ),
+      'zh',
+    );
+    expect(after.subplanEdits).toEqual([]);
+  });
+
+  it('keeps each plan to its own steps: output options and the scoped graph', () => {
+    const graph = graphFromHostCanvas(canvas(), 'zh', hostCatalog());
+    const parent = hostStepOutputOptions(hostScopeGraph(graph, null));
+    expect(parent).toEqual(
+      expect.arrayContaining(['eu.result', 'eu.status', 'summary.report']),
+    );
+    expect(parent.some((output) => output.startsWith('eu/'))).toBe(false);
+    expect(hostStepOutputOptions(hostScopeGraph(graph, 'eu'))).toEqual([
+      'eu/audit.report',
+      'eu/fixes.patch',
+      'eu/ship.note',
+    ]);
+    // A gate dragged in after a sub-plan reviews what it produced.
+    const gate = createPlaygroundNode(
+      'hook_1',
+      'flow.hook',
+      { x: 0, y: 0 },
+      'zh',
+      {
+        configuration: { title: '人工审批', desc: '看一眼欧盟结论' },
+        registry: hostCatalog().registry,
+      },
+    );
+    const nodes = [...graph.nodes, gate];
+    const gated = hostCanvasFromGraph(canvas(), {
+      ...graph,
+      nodes,
+      edges: [
+        ...graph.edges,
+        createPlaygroundEdge(
+          {
+            source: 'eu',
+            sourceHandle: 'done',
+            target: 'hook_1',
+            targetHandle: 'in',
+          },
+          nodes,
+          'zh',
+          hostCatalog().registry,
+        ),
+      ],
+    });
+    const gateStep = (gated.plan.steps as Record<string, unknown>[]).find(
+      (step) => step.step_id === 'hook_1',
+    );
+    expect(gateStep?.inputs).toEqual(['eu.result', 'eu.status']);
+  });
+
+  it('prefixes a sub-plan exactly as the host runs it, and back', () => {
+    const scoped = hostScopedSubplanSteps(
+      [
+        { step_id: 'a', inputs: ['task.goal'], outputs: ['report'] },
+        {
+          step_id: 'r',
+          kind: 'condition',
+          inputs: ['a.report'],
+          cases: [{ label: 'ok', then: ['s'] }],
+          otherwise: ['f'],
+        },
+        {
+          step_id: 'l',
+          kind: 'loop',
+          inputs: ['a.report'],
+          body: ['f'],
+          until: 'f.verdict',
+          collect: 'f.report',
+        },
+        {
+          step_id: 'f',
+          inputs: ['l.previous', 'task.goal'],
+          on_timeout: ['s'],
+        },
+        { step_id: 's', inputs: ['l.result'], depends_on: ['r'] },
+      ],
+      'eu',
+    );
+    // As adapters/flow-host subplan.rs prefixed_plan names them.
+    expect(scoped).toEqual([
+      { step_id: 'eu/a', inputs: ['task.goal'], outputs: ['report'] },
+      {
+        step_id: 'eu/r',
+        kind: 'condition',
+        inputs: ['eu/a.report'],
+        cases: [{ label: 'ok', then: ['eu/s'] }],
+        otherwise: ['eu/f'],
+      },
+      {
+        step_id: 'eu/l',
+        kind: 'loop',
+        inputs: ['eu/a.report'],
+        body: ['eu/f'],
+        until: 'eu/f.verdict',
+        collect: 'eu/f.report',
+      },
+      {
+        step_id: 'eu/f',
+        inputs: ['eu/l.previous', 'task.goal'],
+        on_timeout: ['eu/s'],
+      },
+      { step_id: 'eu/s', inputs: ['eu/l.result'], depends_on: ['eu/r'] },
+    ]);
+    expect(hostScopedSubplanSteps(scoped, 'eu', 'local')).toEqual(
+      hostScopedSubplanSteps(scoped, 'eu', 'local').map((step) => ({
+        ...step,
+      })),
+    );
+    expect(hostScopedSubplanSteps(scoped, 'eu', 'local')[1]).toEqual({
+      step_id: 'r',
+      kind: 'condition',
+      inputs: ['a.report'],
+      cases: [{ label: 'ok', then: ['s'] }],
+      otherwise: ['f'],
+    });
   });
 });

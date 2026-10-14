@@ -813,39 +813,3 @@
 
 /* Host mode, a plan with sub-plans: switch the canvas between the parent
    plan and each sub-plan (floats over the top of the canvas). */
-.a3s-host-plan-views {
-  position: absolute;
-  z-index: 5;
-  top: calc(var(--workflow-header-height) + 12px);
-  left: 50%;
-  display: flex;
-  gap: 4px;
-  padding: 4px;
-  transform: translateX(-50%);
-  border: 1px solid var(--workflow-line);
-  border-radius: 8px;
-  background: var(--workflow-surface);
-  box-shadow: var(--workflow-shadow-chrome);
-}
-
-.a3s-host-plan-views button {
-  padding: 4px 10px;
-  border: 0;
-  border-radius: 6px;
-  background: transparent;
-  color: var(--workflow-muted);
-  font: inherit;
-  font-size: 12px;
-  cursor: pointer;
-}
-
-.a3s-host-plan-views button[aria-pressed='true'] {
-  background: var(--workflow-blue-soft);
-  color: var(--workflow-blue-dark);
-  font-weight: 600;
-}
-
-.a3s-host-plan-views button:disabled {
-  cursor: default;
-  opacity: 0.5;
-}

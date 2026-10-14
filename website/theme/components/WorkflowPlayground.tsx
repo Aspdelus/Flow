@@ -94,8 +94,12 @@ import {
   hostUnsavedNodesNotice,
   hostWithApprovalInputs,
   hostWithConditionInput,
-  hostPlanViews,
-  hostRunExecutionForSubplan,
+  hostPlanSignature,
+  hostPlanStepCount,
+  hostScopeGraph,
+  hostSavePlan,
+  hostSubplanOfNode,
+  hostWorkingCanvas,
   isHostRunExecutionActive,
   isProposalNotYetReady,
   isProposalRefused,
@@ -120,6 +124,7 @@ import {
 import {
   hostEditPlanSteps,
   hostScopeSteps,
+  hostSubplanStepAdded,
 } from './WorkflowPlayground.host-scopes';
 import {
   layoutPlaygroundGraphOffThread,
@@ -260,10 +265,6 @@ function WorkflowPlaygroundSurface({
   // Post-approval execution state, polled from GET /v1/runs/{id} (see the
   // execution-poll effect below). Display-only: Save/Approve gating still
   // reads hostCanvas.flow_status, which only changes on an explicit refetch.
-  // The sub-plan the canvas shows (W26), `null` for the parent plan: every
-  // refresh from the host keeps showing it while the plan still has it.
-  const hostSubplanRef = useRef<string | null>(null);
-  hostSubplanRef.current = hostCanvas?.subplan ?? null;
   const [hostExecution, setHostExecution] = useState<HostRunExecution | null>(
     null,
   );
@@ -381,7 +382,7 @@ function WorkflowPlaygroundSurface({
           if (cancelled) return;
           setHostPlanning(false);
           setHostCanvas(canvas);
-          lastSavedPlanStepsRef.current = JSON.stringify(canvas.plan.steps);
+          lastSavedPlanStepsRef.current = hostPlanSignature(canvas);
           restore(graphFromHostCanvas(canvas, locale, catalog));
           // Continue past every revision the host recorded: this tab's stored
           // count can be behind (another tab or origin saved this run), and the
@@ -1010,6 +1011,29 @@ function WorkflowPlaygroundSurface({
       );
       // A host plan's iteration / loop is a set of plan steps (the scope and
       // its body agents), never Flow's generic container with a stub task.
+      // A group is a sub-plan step; the host plans its contents on save.
+      if (hostMode && hostCanvas && type === 'group') {
+        let stepId = '';
+        const added = editHostPlanSteps(
+          (_, current) => {
+            const next = hostSubplanStepAdded(current, locale);
+            stepId = next.stepId;
+            return next.steps;
+          },
+          locale === 'zh'
+            ? '已新增子计划（未保存）：在右侧写明它的子任务，保存后 AI 会规划里面的步骤'
+            : 'Added a sub-plan (unsaved): write its sub-task in the settings; once saved, the AI plans its steps',
+        );
+        if (added) {
+          setSelectedNodeId(stepId);
+          setSelectedAnnotationId(undefined);
+          setSelectedEdgeId(undefined);
+          setEditingEdgeId(undefined);
+          setActivePanel('settings');
+        }
+        closeNodeLibrary();
+        return;
+      }
       if (hostMode && hostCanvas && (type === 'iteration' || type === 'loop')) {
         let scopeId = '';
         const added = editHostPlanSteps(
@@ -1313,14 +1337,7 @@ function WorkflowPlaygroundSurface({
 
   // Host-mode nodes show the host run's per-step execution state; a local
   // simulation run (if the operator starts one) still takes precedence.
-  const viewSubplan = hostCanvas?.subplan ?? null;
-  const viewExecution = useMemo(
-    () =>
-      hostExecution && viewSubplan
-        ? hostRunExecutionForSubplan(hostExecution, viewSubplan)
-        : hostExecution,
-    [hostExecution, viewSubplan],
-  );
+  const viewExecution = hostExecution;
   const displayStatuses = useMemo(
     () =>
       viewExecution && !running
@@ -1459,80 +1476,120 @@ function WorkflowPlaygroundSurface({
   // graph with the host's (unedited) copy.
   const hostCanvasIsDirty = useCallback((): boolean => {
     if (!hostCanvas) return false;
-    const next = hostCanvasFromGraph(hostCanvas, graph);
-    return JSON.stringify(next.plan.steps) !== lastSavedPlanStepsRef.current;
+    return (
+      hostPlanSignature(hostWorkingCanvas(hostCanvas, graph)) !==
+      lastSavedPlanStepsRef.current
+    );
   }, [graph, hostCanvas]);
 
   // Core of "Save to host," extracted so approveOnHost can await it (and use
   // its resulting canvas's fresh token/digest) before resuming the hook.
   // Does not touch hostBusy -- callers own that so a save-then-approve chain
   // shows one continuous busy state instead of a flicker in between.
-  const saveCanvasToHost = useCallback((): Promise<HostCanvasDocument> => {
-    if (!hostMode || !hostCanvas) {
-      return Promise.reject(new Error('host canvas not loaded'));
-    }
-    const client = createHostClient(hostMode);
-    const nextCanvas = hostCanvasFromGraph(hostCanvas, graph);
-    // Nodes the plan cannot carry are named, never dropped silently.
-    const unsavedNotice = hostUnsavedNodesNotice(
-      hostUnsavedNodes(graph),
-      locale,
-    );
-    // A save that changes the sub-plans has them planned again before the
-    // host answers (W26), which takes a while with a real model.
-    const subplanTasks = (canvas: HostCanvasDocument) =>
-      JSON.stringify(
-        (Array.isArray(canvas.plan.steps) ? (canvas.plan.steps as JsonObject[]) : [])
-          .filter((step) => step.kind === 'subplan')
-          .map((step) => [step.step_id, step.objective, step.inputs]),
+  const saveCanvasToHost =
+    useCallback(async (): Promise<HostCanvasDocument> => {
+      if (!hostMode || !hostCanvas) {
+        throw new Error('host canvas not loaded');
+      }
+      const client = createHostClient(hostMode);
+      // Nodes the plan cannot carry are named, never dropped silently.
+      const unsavedNotice = hostUnsavedNodesNotice(
+        hostUnsavedNodes(graph),
+        locale,
       );
-    const replansSubplans =
-      !hostCanvas.subplan && subplanTasks(nextCanvas) !== subplanTasks(hostCanvas);
-    if (replansSubplans) {
-      setAnnouncement(
-        locale === 'zh'
-          ? '正在保存，并按修改重新规划子计划…'
-          : 'Saving, and planning the changed sub-plans again…',
+      const {
+        parent: nextCanvas,
+        parentChanged,
+        replansSubplans,
+        subplanEdits,
+        refusal,
+      } = hostSavePlan(
+        hostCanvas,
+        graph,
+        lastSavedPlanStepsRef.current,
+        locale,
       );
-    }
-    return client.saveCanvas(nextCanvas, editRevision).then(async (result) => {
-      const outcome = hostSaveOutcome(result);
-      const proposal = result.json.proposal;
-      const refreshed =
-        proposal && typeof proposal === 'object'
-          ? refreshCanvasFromProposalDto(proposal, hostSubplanRef.current)
-          : null;
-      // The next save's revision: past this one if the host recorded it, and
-      // past every revision the host has (an error answer carries none, so
-      // ask for the run's proposal).
-      const latest =
-        refreshed ??
-        (await client.openCanvas(hostMode.runId).catch(() => null));
-      setEditRevision((current) => {
-        const next = nextHostEditRevision(
-          outcome.recorded ? current + 1 : current,
-          latest,
+      if (refusal) throw new Error(refusal);
+      // A save that changes the sub-plans has them planned again before the
+      // host answers (W26), which takes a while with a real model.
+      if (replansSubplans) {
+        setAnnouncement(
+          locale === 'zh'
+            ? '正在保存，并按修改重新规划子计划…'
+            : 'Saving, and planning the changed sub-plans again…',
         );
-        return hostMode.runId && typeof sessionStorage !== 'undefined'
-          ? rememberHostEditRevision(sessionStorage, hostMode.runId, next)
-          : next;
-      });
-      const announcement = `${outcome.message}${
+      }
+      const messages: string[] = [];
+      // When a later part is refused, what was saved before it stays saved:
+      // the canvas keeps the operator's edits, the host's state (and each
+      // sub-plan's next revision) is what the next save compares against.
+      const keepEarlierSaves = async () => {
+        if (messages.length === 0) return;
+        const latest = await client
+          .openCanvas(hostMode.runId)
+          .catch(() => null);
+        if (!latest) return;
+        setHostCanvas(latest);
+        lastSavedPlanStepsRef.current = hostPlanSignature(latest);
+      };
+      // Sub-plans first: their edits need the approval hook a re-planning
+      // parent save leaves for a while.  Each is saved on its own, under its
+      // own revision; a refused one stops the save there.
+      for (const { subplanId, canvas, revision } of subplanEdits) {
+        const outcome = hostSaveOutcome(
+          await client.saveCanvas(canvas, revision),
+        );
+        const label = `${locale === 'zh' ? '子计划' : 'Sub-plan'} ${subplanId}: ${outcome.message}`;
+        if (!outcome.saved) {
+          await keepEarlierSaves();
+          throw new Error([...messages, label].join(' · '));
+        }
+        messages.push(label);
+      }
+      let refreshed: HostCanvasDocument | null = null;
+      if (parentChanged || subplanEdits.length === 0) {
+        const result = await client.saveCanvas(nextCanvas, editRevision);
+        const outcome = hostSaveOutcome(result);
+        const proposal = result.json.proposal;
+        refreshed =
+          proposal && typeof proposal === 'object'
+            ? refreshCanvasFromProposalDto(proposal)
+            : null;
+        // The next save's revision: past this one if the host recorded it, and
+        // past every revision the host has (an error answer carries none, so
+        // ask for the run's proposal).
+        const latest =
+          refreshed ??
+          (await client.openCanvas(hostMode.runId).catch(() => null));
+        setEditRevision((current) => {
+          const next = nextHostEditRevision(
+            outcome.recorded ? current + 1 : current,
+            latest,
+          );
+          return hostMode.runId && typeof sessionStorage !== 'undefined'
+            ? rememberHostEditRevision(sessionStorage, hostMode.runId, next)
+            : next;
+        });
+        if (!outcome.saved) {
+          // Keep the operator's canvas: they fix the step the reason names and
+          // save again.  Never fall through to Approve with the old plan.
+          await keepEarlierSaves();
+          throw new Error([...messages, outcome.message].join(' · '));
+        }
+        messages.push(outcome.message);
+      } else {
+        refreshed = await client.openCanvas(hostMode.runId).catch(() => null);
+      }
+      const announcement = `${messages.join(' · ')}${
         unsavedNotice ? ` · ${unsavedNotice}` : ''
       }`;
-      if (!outcome.saved) {
-        // Keep the operator's canvas: they fix the step the reason names and
-        // save again.  Never fall through to Approve with the old plan.
-        throw new Error(announcement);
-      }
       const savedCanvas = refreshed ?? nextCanvas;
       setHostCanvas(savedCanvas);
       if (refreshed) restore(graphFromHostCanvas(refreshed, locale, catalog));
-      lastSavedPlanStepsRef.current = JSON.stringify(savedCanvas.plan.steps);
+      lastSavedPlanStepsRef.current = hostPlanSignature(savedCanvas);
       setAnnouncement(announcement);
       return savedCanvas;
-    });
-  }, [catalog, editRevision, graph, hostCanvas, hostMode, locale, restore]);
+    }, [catalog, editRevision, graph, hostCanvas, hostMode, locale, restore]);
 
   // "Let the AI plan again": the current canvas goes along as a hint; the run
   // stays the same and gets a new proposal once orchestrator.plan.r{n} ends.
@@ -1582,14 +1639,9 @@ function WorkflowPlaygroundSurface({
             dto.replan_pending === false &&
             dto.approval_hook_waiting === true
           ) {
-            const refreshed = refreshCanvasFromProposalDto(
-              dto,
-              hostSubplanRef.current,
-            );
+            const refreshed = refreshCanvasFromProposalDto(dto);
             setHostCanvas(refreshed);
-            lastSavedPlanStepsRef.current = JSON.stringify(
-              refreshed.plan.steps,
-            );
+            lastSavedPlanStepsRef.current = hostPlanSignature(refreshed);
             restore(graphFromHostCanvas(refreshed, locale, catalog));
             setAnnouncement(
               locale === 'zh' ? 'AI 已给出新方案' : 'The AI drafted a new plan',
@@ -1608,41 +1660,6 @@ function WorkflowPlaygroundSurface({
       })
       .finally(() => setHostBusy(false));
   }, [catalog, editRevision, graph, hostCanvas, hostMode, locale, restore]);
-
-  // Switch the canvas between the parent plan and one of its sub-plans
-  // (each is edited and saved on its own; Approve covers them all).
-  const viewHostPlan = useCallback(
-    (subplanId: string | null) => {
-      if (!hostMode?.runId || !hostCanvas) return;
-      if ((hostCanvas.subplan ?? null) === subplanId) return;
-      if (hostCanvasIsDirty()) {
-        setAnnouncement(
-          locale === 'zh'
-            ? '当前计划有未保存的修改，请先保存'
-            : 'This plan has unsaved edits; save them first',
-        );
-        return;
-      }
-      setHostBusy(true);
-      void createHostClient(hostMode)
-        .getProposal(hostMode.runId)
-        .then((dto) => {
-          const next = refreshCanvasFromProposalDto(dto, subplanId);
-          setHostCanvas(next);
-          lastSavedPlanStepsRef.current = JSON.stringify(next.plan.steps);
-          restore(graphFromHostCanvas(next, locale, catalog));
-          setSelectedNodeId(undefined);
-        })
-        .catch((error: unknown) => {
-          setAnnouncement(
-            error instanceof Error ? error.message : String(error),
-          );
-        })
-        .finally(() => setHostBusy(false));
-    },
-    [catalog, hostCanvas, hostCanvasIsDirty, hostMode, locale, restore],
-  );
-  const planViews = hostPlanViews(hostCanvas, locale);
 
   const saveToHost = useCallback(() => {
     if (!hostMode || !hostCanvas) return;
@@ -1772,12 +1789,9 @@ function WorkflowPlaygroundSurface({
         // immediately, instead of still showing the stale pre-approve state
         // until the operator manually reloads.
         return client.getProposal(hostMode.runId).then((proposal) => {
-          const refreshed = refreshCanvasFromProposalDto(
-            proposal,
-            hostSubplanRef.current,
-          );
+          const refreshed = refreshCanvasFromProposalDto(proposal);
           setHostCanvas(refreshed);
-          lastSavedPlanStepsRef.current = JSON.stringify(refreshed.plan.steps);
+          lastSavedPlanStepsRef.current = hostPlanSignature(refreshed);
           restore(graphFromHostCanvas(refreshed, locale, catalog));
           void loadHostRecoveryFailure(hostMode)
             .then((failure) => setHostRecoveryFailure(failure))
@@ -1814,12 +1828,9 @@ function WorkflowPlaygroundSurface({
     void client
       .getProposal(hostMode.runId)
       .then((proposal) => {
-        const refreshed = refreshCanvasFromProposalDto(
-          proposal,
-          hostSubplanRef.current,
-        );
+        const refreshed = refreshCanvasFromProposalDto(proposal);
         setHostCanvas(refreshed);
-        lastSavedPlanStepsRef.current = JSON.stringify(refreshed.plan.steps);
+        lastSavedPlanStepsRef.current = hostPlanSignature(refreshed);
         restore(graphFromHostCanvas(refreshed, locale, catalog));
       })
       .catch(() => {});
@@ -1850,12 +1861,9 @@ function WorkflowPlaygroundSurface({
       }
       const client = createHostClient(hostMode);
       const proposal = await client.getProposal(hostMode.runId);
-      const refreshed = refreshCanvasFromProposalDto(
-        proposal,
-        hostSubplanRef.current,
-      );
+      const refreshed = refreshCanvasFromProposalDto(proposal);
       setHostCanvas(refreshed);
-      lastSavedPlanStepsRef.current = JSON.stringify(refreshed.plan.steps);
+      lastSavedPlanStepsRef.current = hostPlanSignature(refreshed);
       restore(graphFromHostCanvas(refreshed, locale, catalog));
       const failure = await loadHostRecoveryFailure(hostMode).catch(() => null);
       setHostRecoveryFailure(failure);
@@ -1903,7 +1911,12 @@ function WorkflowPlaygroundSurface({
   const addHostStep = useCallback(() => {
     if (!hostMode || !hostCanvas) return;
     if (!hostRunEditActions(hostCanvas).addStep) return;
-    const next = addHostPlanStep(hostCanvas, graph, locale, catalog);
+    const next = addHostPlanStep(
+      hostWorkingCanvas(hostCanvas, graph),
+      graph,
+      locale,
+      catalog,
+    );
     setHostCanvas(next.canvas);
     restore(next.graph);
     setAnnouncement(
@@ -1922,11 +1935,6 @@ function WorkflowPlaygroundSurface({
   const requestHostCopilot = useCallback(
     async (instruction: string): Promise<string | false> => {
       if (!hostMode || !hostCanvas) return false;
-      if (hostCanvas.subplan) {
-        return locale === 'zh'
-          ? 'AI 助手目前只编辑父计划；子计划请直接在画布上修改。'
-          : 'The AI assistant edits the parent plan only; edit a sub-plan on the canvas.';
-      }
       if (!hostRunEditActions(hostCanvas).addStep) {
         return locale === 'zh'
           ? '该运行已结束，不能再编辑。'
@@ -1944,8 +1952,9 @@ function WorkflowPlaygroundSurface({
         // what a save would do; only one a save would accept is applied.
         const outcome = copilotReplyOutcome(reply, locale);
         if (outcome.apply && reply.suggestedSteps) {
+          // The suggestion is for the parent plan; sub-plans keep their edits.
           const next = applyCopilotSteps(
-            hostCanvas,
+            hostWorkingCanvas(hostCanvas, graph),
             locale,
             catalog,
             reply.suggestedSteps,
@@ -1961,7 +1970,7 @@ function WorkflowPlaygroundSurface({
         setHostBusy(false);
       }
     },
-    [catalog, hostCanvas, hostMode, locale, restore],
+    [catalog, graph, hostCanvas, hostMode, locale, restore],
   );
 
   const requestWorkflowRun = useCallback(() => {
@@ -2029,7 +2038,12 @@ function WorkflowPlaygroundSurface({
       applyGraphEdit: hostMode
         ? (steps: JsonObject[]) => {
             if (!hostCanvas) return;
-            const next = applyCopilotSteps(hostCanvas, locale, catalog, steps);
+            const next = applyCopilotSteps(
+              hostWorkingCanvas(hostCanvas, graphRef.current),
+              locale,
+              catalog,
+              steps,
+            );
             setHostCanvas(next.canvas);
             restore(next.graph);
           }
@@ -2181,9 +2195,7 @@ function WorkflowPlaygroundSurface({
           setSelectedEdgeId(undefined);
           setActivePanel('settings');
         }}
-        onHostReplan={
-          hostEdits?.save && !viewSubplan ? replanOnHost : undefined
-        }
+        onHostReplan={hostEdits?.save ? replanOnHost : undefined}
         onHostSave={hostEdits?.save ? saveToHost : undefined}
         onOpenDocument={openDocument}
         onOpenExtensions={toggleExtensions}
@@ -2220,9 +2232,7 @@ function WorkflowPlaygroundSurface({
             ? {
                 runningStepIds: viewExecution.runningStepIds,
                 completed: viewExecution.completedStepCount,
-                total: Array.isArray(hostCanvas?.plan?.steps)
-                  ? hostCanvas.plan.steps.length
-                  : null,
+                total: hostPlanStepCount(hostCanvas),
               }
             : undefined
         }
@@ -2264,26 +2274,6 @@ function WorkflowPlaygroundSurface({
         <p data-testid="host-load-error" role="alert">
           {hostLoadError}
         </p>
-      ) : null}
-      {planViews ? (
-        <nav
-          aria-label={locale === 'zh' ? '计划与子计划' : 'Plan and sub-plans'}
-          className="a3s-host-plan-views"
-          data-testid="host-plan-views"
-        >
-          {planViews.map((view) => (
-            <button
-              aria-pressed={view.id === viewSubplan}
-              data-testid={`host-plan-view-${view.id ?? 'parent'}`}
-              disabled={!view.ready || hostBusy}
-              key={view.id ?? 'parent'}
-              onClick={() => viewHostPlan(view.id)}
-              type="button"
-            >
-              {view.label}
-            </button>
-          ))}
-        </nav>
       ) : null}
       <noscript>
         {versions.map((targetVersion) => (
@@ -2599,7 +2589,12 @@ function WorkflowPlaygroundSurface({
             hostStepEditor={
               hostMode && selectedNode && hostStepEditorKind(selectedNode) ? (
                 <WorkflowPlaygroundHostStepEditor
-                  graph={graph}
+                  // Its options come from the plan the node is in: the parent
+                  // plan's, or its sub-plan's (inside that container).
+                  graph={hostScopeGraph(
+                    graph,
+                    hostSubplanOfNode(graph, selectedNode.id),
+                  )}
                   locale={locale}
                   node={selectedNode}
                   onApprovalInputs={(nodeId, inputs) =>

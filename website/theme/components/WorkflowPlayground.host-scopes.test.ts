@@ -14,6 +14,7 @@ import {
   hostEditPlanSteps,
   hostScopeOptions,
   hostScopeSteps,
+  hostSubplanStepAdded,
   hostTimeoutFallbackOptions,
   hostTimeoutInRange,
   hostWithRunSettings,
@@ -473,5 +474,98 @@ describe('host step editor kinds', () => {
       { registry: catalog().registry },
     );
     expect(hostStepEditorKind(dropped)).toBeNull();
+  });
+});
+
+describe('host plan edits inside a sub-plan (W26)', () => {
+  // 23: sub-plans eu and us -> summary; eu's own plan is 19 (a loop), us's is 15.
+  const withSubplans = () =>
+    canvasDocumentFromProposalDto({
+      schema_version: 'host.flow-http-proposal.v1',
+      run_id: 'run-s',
+      proposal_digest: 'sha256:s',
+      approval_hook_waiting: true,
+      approval_token: 'tok',
+      proposal: { plan: plan('23') },
+      subplans: [
+        {
+          step_id: 'eu',
+          proposal_digest: 'sha256:eu',
+          proposal: { plan: plan('19') },
+        },
+        {
+          step_id: 'us',
+          proposal_digest: 'sha256:us',
+          proposal: { plan: plan('15') },
+        },
+      ],
+    });
+  const subSteps = (canvas: ReturnType<typeof withSubplans>, id: string) =>
+    (
+      (canvas.subplans ?? []).find((view) => view.step_id === id)?.proposal
+        ?.plan as Record<string, unknown>
+    ).steps as Step[];
+
+  it("edits a sub-plan's steps from the canvas, under their prefix, and leaves the rest", () => {
+    const canvas = withSubplans();
+    const graph = graphFromHostCanvas(canvas, 'zh', catalog());
+    // The loop inside eu and an agent step inside us, as the canvas names them.
+    expect(
+      hostStepEditorKind(graph.nodes.find((node) => node.id === 'eu/refine')!),
+    ).toBe('loop');
+    const next = hostEditPlanSteps(canvas, graph, 'zh', catalog(), (steps) =>
+      hostWithRunSettings(
+        hostWithScopeSettings(steps, 'eu/refine', { maxRounds: 2 }),
+        'us/tax',
+        { timeoutSecs: 90, onTimeout: [], listOutput: false },
+      ),
+    );
+    expect(find(subSteps(next.canvas, 'eu'), 'refine').max_rounds).toBe(2);
+    expect(find(subSteps(next.canvas, 'us'), 'tax').timeout_secs).toBe(90);
+    // Still its own plan's names; the parent plan is as it was.
+    expect(find(subSteps(next.canvas, 'eu'), 'refine').body).toEqual([
+      'check',
+      'draft',
+    ]);
+    expect(plain(next.canvas.plan.steps)).toEqual(plain(stepsOf('23')));
+    // And the canvas shows it.
+    const loop = next.graph.nodes.find((node) => node.id === 'eu/refine');
+    expect((loop?.data.hostPlanStep as Step).max_rounds).toBe(2);
+  });
+
+  it('a parent-only edit (a new iteration, a new sub-plan) keeps every sub-plan', () => {
+    const canvas = withSubplans();
+    const graph = graphFromHostCanvas(canvas, 'zh', catalog());
+    const each = hostEditPlanSteps(
+      canvas,
+      graph,
+      'zh',
+      catalog(),
+      (_, current) => hostScopeSteps(current, 'iteration', 'zh').steps,
+    );
+    expect(plain(subSteps(each.canvas, 'eu'))).toEqual(plain(stepsOf('19')));
+    expect(plain(subSteps(each.canvas, 'us'))).toEqual(plain(stepsOf('15')));
+    const added = hostEditPlanSteps(
+      canvas,
+      graph,
+      'zh',
+      catalog(),
+      (_, current) => hostSubplanStepAdded(current, 'zh').steps,
+    );
+    const fresh = find(added.canvas.plan.steps as Step[], 'subplan-1');
+    expect(fresh).toMatchObject({
+      kind: 'subplan',
+      inputs: ['summary.report'],
+      depends_on: [],
+    });
+    expect(plain(subSteps(added.canvas, 'eu'))).toEqual(plain(stepsOf('19')));
+    // Drawn as an empty group until the host plans it.
+    expect(
+      added.graph.nodes.find((node) => node.id === 'subplan-1~pending')
+        ?.parentId,
+    ).toBe('subplan-1');
+    expect(hostCanvasFromGraph(added.canvas, added.graph).plan.steps).toEqual(
+      added.canvas.plan.steps,
+    );
   });
 });

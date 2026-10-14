@@ -15,7 +15,6 @@ import {
   createA3SFlowExpression,
   planCheckProblems,
   canvasDocumentFromProposalDto,
-  canvasForView,
   createA3SFlowDagNodeCatalog,
   FlowHostClient,
   gateRequestFromDto,
@@ -23,6 +22,7 @@ import {
   issueGateApprovalRecord,
   parseHostModeSearch,
   recoveryFailureFromDto,
+  subplanCanvasDocument,
 } from '@a3s-lab/flow-ui';
 import type { FlowWebsiteLocale } from './flow-node-catalog';
 import type { WorkflowExampleDefinition } from './WorkflowPlayground.examples';
@@ -30,6 +30,7 @@ import { layoutPlaygroundGraphInJavaScript } from './WorkflowPlayground.layout-k
 import {
   createPlaygroundEdge,
   createPlaygroundNode,
+  type PlaygroundEdge,
   type PlaygroundGraphState,
   type PlaygroundNode,
 } from './WorkflowPlayground.model';
@@ -735,43 +736,6 @@ export function hostRunExecutionFromSnapshot(
   };
 }
 
-/** The run's execution as sub-plan `subplanId`'s canvas shows it: its own
- * steps without their `<id>/` prefix (the parent plan's are not on it). */
-export function hostRunExecutionForSubplan(
-  execution: HostRunExecution,
-  subplanId: string,
-): HostRunExecution {
-  const prefix = `${subplanId}/`;
-  const local = (ids: string[]) =>
-    ids
-      .filter((id) => id.startsWith(prefix))
-      .map((id) => id.slice(prefix.length));
-  const nodeStatuses: Record<string, HostNodeRuntimeStatus> = {};
-  for (const [id, status] of Object.entries(execution.nodeStatuses)) {
-    if (id.startsWith(prefix)) nodeStatuses[id.slice(prefix.length)] = status;
-  }
-  // Its own counts, against its own number of steps on the canvas.
-  const counted = Object.values(nodeStatuses);
-  const completedStepCount = counted.filter(
-    (status) => status === 'success',
-  ).length;
-  const failedStepCount = counted.filter((status) => status === 'error').length;
-  const own = execution.nodeStatuses[subplanId];
-  if (Object.keys(nodeStatuses).length > 0) nodeStatuses.start = 'success';
-  if (own === 'success') nodeStatuses.done = 'success';
-  else if (own === 'error') nodeStatuses.done = 'error';
-  const gate = execution.openGateStepId;
-  return {
-    ...execution,
-    nodeStatuses,
-    runningStepIds: local(execution.runningStepIds),
-    skippedStepIds: local(execution.skippedStepIds),
-    openGateStepId: gate?.startsWith(prefix) ? gate.slice(prefix.length) : null,
-    completedStepCount,
-    failedStepCount,
-  };
-}
-
 /**
  * `null` when the run waits on no approval gate. Like
  * loadHostRecoveryFailure, a 404 is the ordinary case, never an error.
@@ -1132,6 +1096,433 @@ function hostSubplanTitle(
   return count === null ? 'Sub-plan' : `Sub-plan · ${count} steps`;
 }
 
+/** An edge of a sub-plan's own plan, to draw once every node is placed. */
+type HostConnection = {
+  source: string;
+  sourceHandle: string;
+  target: string;
+  labelOverride?: string;
+};
+
+/** The `group-start` child of a sub-plan's container: its sub-task. */
+export function hostSubplanStartId(subplanId: string): string {
+  return `${subplanId}~task`;
+}
+
+const scopedId = (subplanId: string, id: string) => `${subplanId}/${id}`;
+const localId = (subplanId: string, id: string) =>
+  id.startsWith(`${subplanId}/`) ? id.slice(subplanId.length + 1) : id;
+
+/** A `<step>.<port>` reference under (`scope`) or out of (`local`) a sub-plan's
+ * prefix; `task.*` reads its sub-task either way. */
+function scopedReference(
+  subplanId: string,
+  reference: string,
+  direction: 'scope' | 'local',
+): string {
+  const dot = reference.lastIndexOf('.');
+  if (dot <= 0) return reference;
+  const source = reference.slice(0, dot);
+  if (source === 'task') return reference;
+  const id =
+    direction === 'scope'
+      ? scopedId(subplanId, source)
+      : localId(subplanId, source);
+  return `${id}${reference.slice(dot)}`;
+}
+
+/**
+ * A sub-plan's steps under (`scope`) or out of (`local`) its `<id>/` prefix:
+ * every step id and every reference to one of its steps, as the host's
+ * `prefixed_plan` (adapters/flow-host subplan.rs) names them when it runs
+ * the sub-plan inside the parent run.  `local` undoes `scope` exactly.
+ */
+export function hostScopedSubplanSteps(
+  steps: readonly JsonObject[],
+  subplanId: string,
+  direction: 'scope' | 'local' = 'scope',
+): JsonObject[] {
+  const id = (value: unknown) =>
+    typeof value === 'string'
+      ? direction === 'scope'
+        ? scopedId(subplanId, value)
+        : localId(subplanId, value)
+      : value;
+  const reference = (value: unknown) =>
+    typeof value === 'string'
+      ? scopedReference(subplanId, value, direction)
+      : value;
+  return steps.map((original) => {
+    const step: JsonObject = {
+      ...original,
+      step_id: id(original.step_id) as string,
+    };
+    for (const field of ['depends_on', 'body', 'on_timeout', 'otherwise']) {
+      if (Array.isArray(step[field]))
+        step[field] = (step[field] as unknown[]).map(id) as JsonObject[string];
+    }
+    if (Array.isArray(step.inputs))
+      step.inputs = (step.inputs as unknown[]).map(reference) as string[];
+    for (const field of ['until', 'collect']) {
+      if (typeof step[field] === 'string')
+        step[field] = reference(step[field]) as string;
+    }
+    if (Array.isArray(step.cases)) {
+      step.cases = (step.cases as JsonObject[]).map((item) =>
+        Array.isArray(item.then)
+          ? { ...item, then: (item.then as unknown[]).map(id) as string[] }
+          : item,
+      );
+    }
+    return step;
+  });
+}
+
+/** Sub-plan `subplanId`'s canvas with its steps under their prefix. */
+function hostScopedSubplanCanvas(
+  sub: HostCanvasDocument,
+  subplanId: string,
+): HostCanvasDocument {
+  const steps = Array.isArray(sub.plan.steps)
+    ? (sub.plan.steps as JsonObject[])
+    : [];
+  return {
+    ...sub,
+    plan: { ...sub.plan, steps: hostScopedSubplanSteps(steps, subplanId) },
+  };
+}
+
+function hostNodeInScope(
+  node: PlaygroundNode,
+  parentId: string,
+): PlaygroundNode {
+  return {
+    ...node,
+    parentId,
+    extent: 'parent',
+    expandParent: true,
+    data: { ...node.data, dagNode: { ...node.data.dagNode, parentId } },
+  };
+}
+
+/**
+ * What a sub-plan's container holds: a `group-start` child standing for its
+ * sub-task, then its own plan (start/done dropped, the steps under its
+ * prefix).  A sub-plan not planned yet shows one placeholder.
+ */
+function hostSubplanInnerGraph(
+  canvas: HostCanvasDocument,
+  subplanId: string,
+  objective: unknown,
+  locale: FlowWebsiteLocale,
+  catalog: A3SFlowDagNodeCatalog,
+): { nodes: PlaygroundNode[]; edges: HostConnection[] } {
+  const zh = locale === 'zh';
+  const registry = catalog.registry;
+  const startId = hostSubplanStartId(subplanId);
+  const start = createPlaygroundNode(
+    startId,
+    'group-start',
+    { x: 0, y: 0 },
+    locale,
+    {
+      configuration: {
+        title: zh ? '子任务' : 'Sub-task',
+        desc: String(objective ?? ''),
+      },
+      parentId: subplanId,
+      registry,
+    },
+  );
+  start.data = { ...start.data, hostSubplanPart: subplanId };
+  const sub = subplanCanvasDocument(canvas, subplanId);
+  if (!sub) {
+    const pending = createPlaygroundNode(
+      `${subplanId}~pending`,
+      'flow.step',
+      { x: 0, y: 0 },
+      locale,
+      {
+        configuration: {
+          title: zh ? '等待规划' : 'Not planned yet',
+          desc: zh
+            ? '保存后，AI 会按子任务规划这里的步骤。'
+            : 'Once saved, the AI plans these steps from the sub-task.',
+        },
+        parentId: subplanId,
+        registry,
+      },
+    );
+    pending.data = { ...pending.data, hostSubplanPart: subplanId };
+    return {
+      nodes: [start, pending],
+      edges: [{ source: startId, sourceHandle: 'next', target: pending.id }],
+    };
+  }
+  const inner = hostPlanProjection(
+    hostScopedSubplanCanvas(sub, subplanId),
+    locale,
+    catalog,
+  );
+  const nodes = [
+    start,
+    ...inner.nodes
+      .filter((node) => node.id !== 'start' && node.id !== 'done')
+      .map((node) => (node.parentId ? node : hostNodeInScope(node, subplanId))),
+  ];
+  const edges = inner.edges
+    .filter((item) => item.target !== 'done')
+    .map((item) => ({
+      source: item.source === 'start' ? startId : item.source,
+      sourceHandle:
+        item.source === 'start' ? 'next' : String(item.sourceHandle ?? ''),
+      target: item.target,
+      ...(typeof item.data?.labelOverride === 'string'
+        ? { labelOverride: item.data.labelOverride }
+        : {}),
+    }));
+  return { nodes, edges };
+}
+
+/** The sub-plan container each canvas node sits in (at any depth), if any. */
+function hostSubplanOwners(graph: PlaygroundGraphState): Map<string, string> {
+  const byId = new Map(graph.nodes.map((node) => [node.id, node]));
+  const isSubplan = (node: PlaygroundNode | undefined) =>
+    (node?.data.hostPlanStep as JsonObject | undefined)?.kind === 'subplan' ||
+    String((node?.data.dagNode?.data as JsonObject | undefined)?.type ?? '') ===
+      'group';
+  const owners = new Map<string, string>();
+  for (const node of graph.nodes) {
+    let parent = node.parentId ? byId.get(node.parentId) : undefined;
+    const seen = new Set<string>();
+    while (parent && !seen.has(parent.id)) {
+      seen.add(parent.id);
+      if (isSubplan(parent)) {
+        owners.set(node.id, parent.id);
+        break;
+      }
+      parent = parent.parentId ? byId.get(parent.parentId) : undefined;
+    }
+  }
+  return owners;
+}
+
+/** The part of the canvas in one scope: the parent plan's (`null`) or one
+ * sub-plan's (its container's contents, ids as drawn). */
+export function hostScopeGraph(
+  graph: PlaygroundGraphState,
+  subplanId: string | null,
+): PlaygroundGraphState {
+  const owners = hostSubplanOwners(graph);
+  if (subplanId === null && owners.size === 0) return graph;
+  const inScope = new Set(
+    graph.nodes
+      .filter((node) => (owners.get(node.id) ?? null) === subplanId)
+      .map((node) => node.id),
+  );
+  return {
+    ...graph,
+    nodes: graph.nodes.filter((node) => inScope.has(node.id)),
+    edges: graph.edges.filter(
+      (item) => inScope.has(item.source) && inScope.has(item.target),
+    ),
+  };
+}
+
+/** The sub-plan (container id) a canvas node belongs to, `null` for the parent plan. */
+export function hostSubplanOfNode(
+  graph: PlaygroundGraphState,
+  nodeId: string,
+): string | null {
+  return hostSubplanOwners(graph).get(nodeId) ?? null;
+}
+
+/**
+ * Sub-plan `subplanId` as the canvas has it now: its canvas document with the
+ * steps drawn inside its container (back out of their prefix), ready to save
+ * as that sub-plan's edit.  `null` while it is not planned or not on the canvas.
+ */
+export function hostSubplanCanvasFromGraph(
+  canvas: HostCanvasDocument,
+  graph: PlaygroundGraphState,
+  subplanId: string,
+): HostCanvasDocument | null {
+  const sub = subplanCanvasDocument(canvas, subplanId);
+  if (!sub || !graph.nodes.some((node) => node.id === subplanId)) return null;
+  const startId = hostSubplanStartId(subplanId);
+  const scope = hostScopeGraph(graph, subplanId);
+  // Its own canvas: the container's children at the top, its start child as `start`.
+  const local: PlaygroundGraphState = {
+    ...scope,
+    nodes: scope.nodes.map((node) =>
+      node.id === startId
+        ? { ...node, id: 'start', parentId: undefined }
+        : node.parentId === subplanId
+          ? { ...node, parentId: undefined }
+          : node,
+    ),
+    edges: scope.edges.map((item) =>
+      item.source === startId ? { ...item, source: 'start' } : item,
+    ),
+  };
+  const rebuilt = hostCanvasFromGraph(
+    hostScopedSubplanCanvas(sub, subplanId),
+    local,
+  );
+  return applyCanvasNodeEdits(
+    sub,
+    rebuilt.nodes.map((node) => ({
+      ...node,
+      id: localId(subplanId, node.id),
+      depends_on: node.depends_on.map((id) => localId(subplanId, String(id))),
+      plan_step: hostScopedSubplanSteps(
+        [node.plan_step],
+        subplanId,
+        'local',
+      )[0],
+    })),
+  );
+}
+
+/** The canvas document for what the canvas shows now: the parent plan's
+ * steps and each planned sub-plan's, unsaved edits included. */
+export function hostWorkingCanvas(
+  canvas: HostCanvasDocument,
+  graph: PlaygroundGraphState,
+): HostCanvasDocument {
+  const parent = hostCanvasFromGraph(canvas, graph);
+  if (!canvas.subplans?.length) return parent;
+  return {
+    ...parent,
+    subplans: canvas.subplans.map((view) => {
+      const sub = hostSubplanCanvasFromGraph(canvas, graph, view.step_id);
+      return sub && view.proposal
+        ? { ...view, proposal: { ...view.proposal, plan: sub.plan } }
+        : view;
+    }),
+  };
+}
+
+/** The steps of every plan a canvas document holds, to tell an edit from
+ * what the host has: `{parent, subplans: {id: steps | null}}` as JSON. */
+export function hostPlanSignature(canvas: HostCanvasDocument): string {
+  return JSON.stringify({
+    parent: canvas.plan.steps,
+    subplans: Object.fromEntries(
+      (canvas.subplans ?? []).map((view) => [
+        view.step_id,
+        (view.proposal?.plan as JsonObject | undefined)?.steps ?? null,
+      ]),
+    ),
+  });
+}
+
+/** The steps sub-plan `subplanId` has in a `hostPlanSignature`, as JSON. */
+export function hostSignatureSubplanSteps(
+  signature: string | null,
+  subplanId: string,
+): string | null {
+  if (!signature) return null;
+  const parsed = JSON.parse(signature) as {
+    subplans?: Record<string, unknown>;
+  };
+  const steps = parsed.subplans?.[subplanId];
+  return steps === undefined ? null : JSON.stringify(steps);
+}
+
+/** What a save of the canvas sends, worked out before anything is sent. */
+export type HostSavePlan = {
+  /** The parent plan as the canvas has it. */
+  parent: HostCanvasDocument;
+  /** It differs from what the host has (else only sub-plans are saved). */
+  parentChanged: boolean;
+  /** A sub-plan step's sub-task changed, was added or dropped: the host plans those again. */
+  replansSubplans: boolean;
+  /** Each sub-plan whose own steps were edited, as its edit (under its next revision). */
+  subplanEdits: {
+    subplanId: string;
+    canvas: HostCanvasDocument;
+    revision: number;
+  }[];
+  /** Why nothing may be sent, if so. */
+  refusal: string | null;
+};
+
+/**
+ * Split a canvas save into the edits the host takes: the parent plan's, and
+ * one per sub-plan whose steps (inside its container) changed since
+ * `savedSignature` (a `hostPlanSignature` of what the host has).  A sub-plan
+ * whose sub-task changed as well is refused: the host would plan it anew
+ * and replace those edits.
+ */
+export function hostSavePlan(
+  canvas: HostCanvasDocument,
+  graph: PlaygroundGraphState,
+  savedSignature: string | null,
+  locale: FlowWebsiteLocale,
+): HostSavePlan {
+  const parent = hostCanvasFromGraph(canvas, graph);
+  const saved = savedSignature
+    ? (JSON.parse(savedSignature) as { parent?: unknown })
+    : null;
+  const savedSteps =
+    saved && 'parent' in saved ? saved.parent : canvas.plan.steps;
+  const subplanTasks = (steps: unknown) =>
+    (Array.isArray(steps) ? (steps as JsonObject[]) : [])
+      .filter((step) => step.kind === 'subplan')
+      .map((step) =>
+        JSON.stringify([step.step_id, step.objective, step.inputs]),
+      );
+  const before = new Set(subplanTasks(savedSteps));
+  const after = subplanTasks(parent.plan.steps);
+  const subplanEdits = (canvas.subplans ?? []).flatMap((view) => {
+    const sub = hostSubplanCanvasFromGraph(canvas, graph, view.step_id);
+    if (
+      !sub ||
+      JSON.stringify(sub.plan.steps) ===
+        hostSignatureSubplanSteps(savedSignature, view.step_id)
+    ) {
+      return [];
+    }
+    const revision =
+      (typeof view.last_edit_revision === 'number'
+        ? Math.floor(view.last_edit_revision)
+        : 0) + 1;
+    return [{ subplanId: view.step_id, canvas: sub, revision }];
+  });
+  const replanned = subplanEdits.find(({ subplanId }) => {
+    const task = after.find((item) => JSON.parse(item)[0] === subplanId);
+    return !task || !before.has(task);
+  });
+  return {
+    parent,
+    parentChanged:
+      JSON.stringify(parent.plan.steps) !== JSON.stringify(savedSteps),
+    replansSubplans:
+      after.length !== before.size || after.some((task) => !before.has(task)),
+    subplanEdits,
+    refusal: replanned
+      ? locale === 'zh'
+        ? `子计划 ${replanned.subplanId} 的子任务和里面的步骤都改了：改了子任务会重新规划这个子计划，里面的修改会被替换。请先保存其中一项。`
+        : `Sub-plan ${replanned.subplanId} has both its sub-task and its steps edited: a new sub-task plans it again and replaces those edits. Save one of them first.`
+      : null,
+  };
+}
+
+/** How many steps the run has: the parent plan's and every planned sub-plan's. */
+export function hostPlanStepCount(
+  canvas: HostCanvasDocument | null,
+): number | null {
+  if (!canvas || !Array.isArray(canvas.plan.steps)) return null;
+  return (
+    canvas.plan.steps.length +
+    (canvas.subplans ?? []).reduce((total, view) => {
+      const steps = (view.proposal?.plan as JsonObject | undefined)?.steps;
+      return total + (Array.isArray(steps) ? steps.length : 0);
+    }, 0)
+  );
+}
+
 function hostApprovalTitle(locale: FlowWebsiteLocale): string {
   return locale === 'zh' ? '人工审批' : 'Human approval';
 }
@@ -1172,7 +1563,10 @@ export function graphFromHostCanvas(
     ? (canvas.plan.steps as JsonObject[])
     : [];
   try {
-    const fromDsl = graphFromHostFlowDsl(canvas, locale, catalog);
+    // The host's DSL draws a sub-plan as one node; its plan is drawn inside it.
+    const fromDsl = canvas.subplans?.length
+      ? null
+      : graphFromHostFlowDsl(canvas, locale, catalog);
     if (fromDsl) {
       // DSL is preview-only. When the operator adds plan steps, the DSL graph
       // still reflects the last host projection and would drop the edit —
@@ -1198,7 +1592,17 @@ export function graphFromHostCanvas(
   } catch {
     // Fall back to plan projection when DSL types are incomplete.
   }
+  const { nodes, edges } = hostPlanProjection(canvas, locale, catalog);
+  return layoutPlaygroundGraphInJavaScript({ nodes, edges, annotations: [] });
+}
 
+/** The plan's steps as canvas nodes and edges (before layout), from `start`
+ * to `done`; every sub-plan's own plan is drawn inside its container. */
+function hostPlanProjection(
+  canvas: HostCanvasDocument,
+  locale: FlowWebsiteLocale,
+  catalog: A3SFlowDagNodeCatalog,
+): { nodes: PlaygroundNode[]; edges: PlaygroundEdge[] } {
   const registry = catalog.registry;
   const nodes: PlaygroundNode[] = [];
   const start = createPlaygroundNode(
@@ -1254,6 +1658,8 @@ export function graphFromHostCanvas(
   }
   // Children go after every container, so React Flow sees each parent first.
   const bodyNodes: PlaygroundNode[] = [];
+  const subplanNodes: PlaygroundNode[] = [];
+  const subplanEdges: HostConnection[] = [];
   steps.forEach((step, index) => {
     const stepId = String(step.step_id ?? `step-${index + 1}`);
     const objective =
@@ -1367,26 +1773,35 @@ export function graphFromHostCanvas(
       nodes.push(node);
       return;
     }
-    // A sub-plan has a plan of its own (open it with the sub-plan switcher);
-    // here it is one node that ends when that plan does.
+    // A sub-plan is a Flow `group` container with its own plan drawn
+    // inside it, under the `<id>/` prefix its steps run under.
     if (step.kind === 'subplan') {
       const node = createPlaygroundNode(
         stepId,
-        'flow.child-workflow',
+        'group',
         { x: 0, y: 0 },
         locale,
         {
           configuration: {
             title: hostSubplanTitle(locale, canvas, stepId),
             desc: objective,
-            child_id: stepId,
+            start_node_id: hostSubplanStartId(stepId),
           },
           registry,
         },
       );
       markHost(node, step);
-      typeOf.set(stepId, 'flow.child-workflow');
+      typeOf.set(stepId, 'group');
       nodes.push(node);
+      const inner = hostSubplanInnerGraph(
+        canvas,
+        stepId,
+        objective,
+        locale,
+        catalog,
+      );
+      subplanNodes.push(...inner.nodes);
+      subplanEdges.push(...inner.edges);
       return;
     }
     if (step.kind === 'approval') {
@@ -1434,7 +1849,7 @@ export function graphFromHostCanvas(
     typeOf.set(stepId, 'flow.step');
     (bodyOwner.has(stepId) ? bodyNodes : nodes).push(node);
   });
-  nodes.push(...bodyNodes);
+  nodes.push(...bodyNodes, ...subplanNodes);
 
   const done = createPlaygroundNode(
     'done',
@@ -1586,8 +2001,17 @@ export function graphFromHostCanvas(
       ),
     );
   }
-
-  return layoutPlaygroundGraphInJavaScript({ nodes, edges, annotations: [] });
+  for (const connection of subplanEdges) {
+    edges.push(
+      edge(
+        connection.source,
+        connection.sourceHandle,
+        connection.target,
+        connection.labelOverride,
+      ),
+    );
+  }
+  return { nodes, edges };
 }
 
 function objectiveFromNode(node: PlaygroundNode, fallback: unknown): unknown {
@@ -1628,7 +2052,8 @@ export function hostUnsavedNodes(
         node.id !== 'start' &&
         node.id !== 'done' &&
         typeof node.data.hostConditionPart !== 'string' &&
-        typeof node.data.hostIterationPart !== 'string',
+        typeof node.data.hostIterationPart !== 'string' &&
+        typeof node.data.hostSubplanPart !== 'string',
     )
     .map((node) => {
       const data = node.data.dagNode?.data as JsonObject | undefined;
@@ -1835,8 +2260,8 @@ const HOST_CONTROL_NODE_KINDS: Readonly<Record<string, string>> = {
   'flow.condition': 'condition',
   'flow.hook': 'approval',
   'flow.fail': 'fail',
-  // A sub-workflow from the library is a sub-plan: the host plans it on save (W26).
-  'flow.child-workflow': 'subplan',
+  // A group from the library is a sub-plan: the host plans it on save (W26).
+  group: 'subplan',
 };
 
 function hostNodeType(node: PlaygroundNode): string {
@@ -1888,8 +2313,10 @@ function hostConditionSource(node: PlaygroundNode): string | null {
  */
 export function hostCanvasFromGraph(
   canvas: HostCanvasDocument,
-  graph: PlaygroundGraphState,
+  fullGraph: PlaygroundGraphState,
 ): HostCanvasDocument {
+  // A sub-plan's own steps (inside its container) are saved with it, not here.
+  const graph = hostScopeGraph(fullGraph, null);
   const nodes: HostPlanStepNode[] = [];
   const planStepOf = (node: PlaygroundNode) =>
     node.data.hostPlanStep as JsonObject | undefined;
@@ -1929,7 +2356,9 @@ export function hostCanvasFromGraph(
     if (step) {
       outputsOf.set(
         node.id,
-        step.kind === 'subplan' ? ['result', 'status'] : hostStringItems(step.outputs),
+        step.kind === 'subplan'
+          ? ['result', 'status']
+          : hostStringItems(step.outputs),
       );
     }
   }
@@ -2142,35 +2571,9 @@ export function addHostPlanStep(
   };
 }
 
-/** The canvas for a fresh proposal DTO: the parent plan, or the sub-plan the
- * operator is looking at (`subplanId`) while the plan still has it. */
-export function refreshCanvasFromProposalDto(
-  dto: unknown,
-  subplanId: string | null = null,
-): HostCanvasDocument {
-  return canvasForView(dto, subplanId);
-}
-
-/** The plans of a run the operator can switch the canvas between: the
- * parent, then each sub-plan (`ready` once it is planned). `null` for a plan
- * without sub-plans. */
-export function hostPlanViews(
-  canvas: HostCanvasDocument | null,
-  locale: FlowWebsiteLocale,
-): { id: string | null; label: string; ready: boolean }[] | null {
-  if (!canvas?.subplans?.length) return null;
-  return [
-    {
-      id: null,
-      label: locale === 'zh' ? '父计划' : 'Parent plan',
-      ready: true,
-    },
-    ...canvas.subplans.map((view) => ({
-      id: view.step_id,
-      label: `${locale === 'zh' ? '子计划' : 'Sub-plan'} ${view.step_id}`,
-      ready: view.proposal !== null,
-    })),
-  ];
+/** The canvas for a fresh proposal DTO (its sub-plans are drawn inside it). */
+export function refreshCanvasFromProposalDto(dto: unknown): HostCanvasDocument {
+  return canvasDocumentFromProposalDto(dto);
 }
 
 /** A host finding about a suggestion (`refused`, or one of `warnings`). */
