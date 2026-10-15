@@ -434,8 +434,14 @@ fn a_group_scope_compiles_once_and_nests_like_any_container() {
 
     let plan = graph.execution_plan().expect("valid group plan");
     assert_eq!(plan.top_level(), ["start", "review", "end"]);
-    assert_eq!(plan.scope("review").expect("group scope"), ["review-start", "draft", "each"]);
-    assert_eq!(plan.scope("each").expect("nested iteration scope"), ["each-start", "check"]);
+    assert_eq!(
+        plan.scope("review").expect("group scope"),
+        ["review-start", "draft", "each"]
+    );
+    assert_eq!(
+        plan.scope("each").expect("nested iteration scope"),
+        ["each-start", "check"]
+    );
 
     for (graph, expected) in [
         (

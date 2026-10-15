@@ -193,7 +193,11 @@ fn validate_container_scopes(
         };
         let child_type = node.node_type();
         if is_container_start_type(child_type) && child_type != parent_start {
-            let article = if parent_start.starts_with(['a', 'e', 'i', 'o', 'u']) { "an" } else { "a" };
+            let article = if parent_start.starts_with(['a', 'e', 'i', 'o', 'u']) {
+                "an"
+            } else {
+                "a"
+            };
             return Err(invalid_graph(format!(
                 "{parent_type} {parent_id:?} requires {article} {parent_start} child, not {:?}",
                 node.id()
