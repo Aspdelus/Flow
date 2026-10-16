@@ -74,8 +74,9 @@ export type HostComposeProgressFrame = {
   progress_token: string;
   progress: number;
   /** `"phase"` on a planning-phase frame (host-derived from the
-   * orchestrator's Code event page); absent on compose_plan drafts. */
-  kind?: 'phase';
+   * orchestrator's Code event page), `"plan_step"` on one step of the plan
+   * being composed; absent on compose_plan drafts. */
+  kind?: 'phase' | 'plan_step';
   /** Phase frames only: `model` (thinking), `tool`, or `finished`. */
   phase?: string;
   /** Phase frames only: short orchestrator tool name when `phase` is `tool`. */
@@ -86,6 +87,16 @@ export type HostComposeProgressFrame = {
   generated_chars?: number;
   /** Phase frames only: ms since this planning dispatch's first event. */
   elapsed_ms?: number;
+  /** Plan-step frames only: the step (an AgentPlan step without its
+   * rationale) -- a preview the canvas draws before the proposal exists. */
+  step?: JsonObject;
+  /** Plan-step frames only: which compose_plan call of the planning dispatch
+   * the step belongs to; a newer one replaces the steps of the one before. */
+  revision?: number;
+  /** Plan-step frames only: the Flow step that planned it
+   * (`orchestrator.plan`, a re-plan `orchestrator.plan.r<n>`, or a
+   * sub-plan's `orchestrator.plan.sub:...`). */
+  plan_scope?: string;
 };
 
 /**
@@ -147,7 +158,9 @@ function parseComposeProgressLine(line: string): HostComposeProgressFrame | null
       progress_token:
         typeof value.progress_token === 'string' ? value.progress_token : '',
       progress: typeof value.progress === 'number' ? value.progress : 0,
-      ...(value.kind === 'phase' ? { kind: 'phase' as const } : {}),
+      ...(value.kind === 'phase' || value.kind === 'plan_step'
+        ? { kind: value.kind }
+        : {}),
       ...(typeof value.phase === 'string' ? { phase: value.phase } : {}),
       ...(typeof value.tool === 'string' ? { tool: value.tool } : {}),
       ...(typeof value.model_calls === 'number'
@@ -158,6 +171,17 @@ function parseComposeProgressLine(line: string): HostComposeProgressFrame | null
         : {}),
       ...(typeof value.elapsed_ms === 'number'
         ? { elapsed_ms: value.elapsed_ms }
+        : {}),
+      ...(value.step !== null &&
+      typeof value.step === 'object' &&
+      !Array.isArray(value.step)
+        ? { step: value.step as JsonObject }
+        : {}),
+      ...(typeof value.revision === 'number'
+        ? { revision: value.revision }
+        : {}),
+      ...(typeof value.plan_scope === 'string'
+        ? { plan_scope: value.plan_scope }
         : {}),
     };
   } catch {

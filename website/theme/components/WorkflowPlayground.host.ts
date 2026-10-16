@@ -1554,6 +1554,53 @@ export function hostLoopStartId(stepId: string): string {
   return `${stepId}~round`;
 }
 
+/** The steps of the plan being composed, as they reached the progress
+ * stream, keyed by the compose_plan call they belong to (see
+ * {@link mergeHostDraftStep}). */
+export type HostDraftQueue = { key: string; steps: JsonObject[] };
+
+export const EMPTY_HOST_DRAFT: HostDraftQueue = { key: '', steps: [] };
+
+/** Fold one progress frame into the planning preview. A plan-step frame of
+ * another compose_plan call (a re-plan, or the model composing again) starts
+ * the preview over; a step that arrives again replaces itself in place.
+ * Only the run's own plan is previewed: a sub-plan is planned after its
+ * parent and drawn inside it once the proposal is there. */
+export function mergeHostDraftStep(
+  queue: HostDraftQueue,
+  frame: HostComposeProgressFrame,
+): HostDraftQueue {
+  if (frame.kind !== 'plan_step' || !frame.step) return queue;
+  const scope = frame.plan_scope ?? 'orchestrator.plan';
+  if (scope.includes('.sub:')) return queue;
+  const key = `${scope}#${frame.revision ?? 0}`;
+  const steps = key === queue.key ? [...queue.steps] : [];
+  const id = String(frame.step.step_id ?? '');
+  const at = steps.findIndex((step) => String(step.step_id ?? '') === id);
+  if (at >= 0) steps[at] = frame.step;
+  else steps.push(frame.step);
+  return { key, steps };
+}
+
+/** A canvas document for the planning preview: the steps composed so far,
+ * drawn by the same projection as a proposal. Never saved or approved --
+ * the proposal replaces it as soon as it exists. */
+export function hostDraftCanvas(
+  runId: string,
+  steps: readonly JsonObject[],
+): HostCanvasDocument {
+  return canvasDocumentFromProposalDto({
+    run_id: runId,
+    flow_status: 'running',
+    proposal: {
+      plan: {
+        steps: [...steps],
+        execution_order: steps.map((step) => String(step.step_id ?? '')),
+      },
+    },
+  });
+}
+
 export function graphFromHostCanvas(
   canvas: HostCanvasDocument,
   locale: FlowWebsiteLocale,

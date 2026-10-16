@@ -21,6 +21,9 @@ import {
   createHostModeCatalog,
   createHostRunPickerExample,
   graphFromHostCanvas,
+  EMPTY_HOST_DRAFT,
+  hostDraftCanvas,
+  mergeHostDraftStep,
   hostCanvasFromGraph,
   hostApprovalInputs,
   hostConditionChain,
@@ -3234,5 +3237,56 @@ describe('WorkflowPlayground host mode: sub-plans (W26)', () => {
       cases: [{ label: 'ok', then: ['s'] }],
       otherwise: ['f'],
     });
+  });
+});
+
+describe('planning preview', () => {
+  const frame = (step: Record<string, unknown>, revision = 1, scope = 'orchestrator.plan') => ({
+    schema_version: 'host.compose-progress.v1',
+    flow_run_id: 'run-1',
+    observed_at_utc: '',
+    step_index: 1,
+    total: 2,
+    agent_id: String(step.agent_id ?? ''),
+    status: 'plan_step',
+    progress_token: '',
+    progress: 1,
+    kind: 'plan_step' as const,
+    step,
+    revision,
+    plan_scope: scope,
+  });
+
+  it('collects the steps of one compose_plan call and starts over on the next', () => {
+    let queue = mergeHostDraftStep(EMPTY_HOST_DRAFT, frame({ step_id: 'audit', agent_id: 'auditor' }));
+    queue = mergeHostDraftStep(queue, frame({ step_id: 'write', agent_id: 'writer' }));
+    queue = mergeHostDraftStep(queue, frame({ step_id: 'audit', agent_id: 'auditor-2' }));
+    expect(queue.steps.map((step) => [step.step_id, step.agent_id])).toEqual([
+      ['audit', 'auditor-2'],
+      ['write', 'writer'],
+    ]);
+    const next = mergeHostDraftStep(queue, frame({ step_id: 'only', agent_id: 'a' }, 2));
+    expect(next.steps.map((step) => step.step_id)).toEqual(['only']);
+    const replan = mergeHostDraftStep(next, frame({ step_id: 'r', agent_id: 'a' }, 1, 'orchestrator.plan.r2'));
+    expect(replan.steps.map((step) => step.step_id)).toEqual(['r']);
+  });
+
+  it('ignores sub-plan planning and frames that are not plan steps', () => {
+    const queue = mergeHostDraftStep(EMPTY_HOST_DRAFT, frame({ step_id: 'audit' }));
+    expect(mergeHostDraftStep(queue, frame({ step_id: 'inner' }, 1, 'orchestrator.plan.sub:eu.abc'))).toBe(queue);
+    expect(mergeHostDraftStep(queue, { ...frame({ step_id: 'x' }), kind: 'phase' })).toBe(queue);
+  });
+
+  it('draws the composed steps with the proposal projection', () => {
+    const catalog = createHostModeCatalog(createPlaygroundNodeCatalog('en'));
+    const canvas = hostDraftCanvas('run-1', [
+      { step_id: 'audit', agent_id: 'auditor', objective: 'Audit', inputs: ['task.goal'], outputs: ['findings'] },
+      { step_id: 'write', agent_id: 'writer', objective: 'Write', inputs: ['audit.findings'], outputs: ['report'] },
+    ]);
+    expect(canvas.run_id).toBe('run-1');
+    const graph = graphFromHostCanvas(canvas, 'en', catalog);
+    const steps = graph.nodes.filter((node) => node.data?.hostPlanStep).map((node) => node.id);
+    expect(steps).toEqual(['audit', 'write']);
+    expect(graph.edges.some((edge) => edge.source === 'audit' && edge.target === 'write')).toBe(true);
   });
 });

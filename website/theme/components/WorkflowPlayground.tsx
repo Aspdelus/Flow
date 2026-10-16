@@ -87,6 +87,10 @@ import {
   beginNewRun,
   createHostClient,
   graphFromHostCanvas,
+  EMPTY_HOST_DRAFT,
+  hostDraftCanvas,
+  mergeHostDraftStep,
+  type HostDraftQueue,
   hostCanvasFromGraph,
   hostRewireOtherwise,
   hostStepEditorKind,
@@ -258,6 +262,12 @@ function WorkflowPlaygroundSurface({
   // hostProgress so a later phase frame never hides the last draft.
   const [hostPlanningPhase, setHostPlanningPhase] =
     useState<HostComposeProgressFrame | null>(null);
+  // The plan being composed, as plan-step frames bring it (a ref: frames
+  // arrive faster than they are shown), and how many of its steps the
+  // canvas shows so far -- one more every HOST_DRAFT_REVEAL_MS, so a plan
+  // that arrives in one burst still appears step by step.
+  const hostDraftRef = useRef<HostDraftQueue>(EMPTY_HOST_DRAFT);
+  const [hostDraftShown, setHostDraftShown] = useState({ key: '', count: 0 });
   // Ticks once a second while planning so the header can show elapsed time
   // even between progress frames (a single model call can take a minute).
   const [planningNow, setPlanningNow] = useState(() => Date.now());
@@ -473,12 +483,20 @@ function WorkflowPlaygroundSurface({
     if (!hostMode?.runId || hostCanvas) {
       setHostProgress(null);
       setHostPlanningPhase(null);
+      hostDraftRef.current = EMPTY_HOST_DRAFT;
+      setHostDraftShown({ key: '', count: 0 });
       return;
     }
     const controller = new AbortController();
     const onFrame = (frame: HostComposeProgressFrame): void => {
-      if (frame.kind === 'phase') setHostPlanningPhase(frame);
-      else setHostProgress(frame);
+      if (frame.kind === 'phase') {
+        setHostPlanningPhase(frame);
+        return;
+      }
+      if (frame.kind === 'plan_step') {
+        hostDraftRef.current = mergeHostDraftStep(hostDraftRef.current, frame);
+      }
+      setHostProgress(frame);
     };
     // Resubscribe whenever the stream ends before the proposal arrives: a
     // run the host has not recorded yet, a dropped connection, or a host
@@ -498,6 +516,45 @@ function WorkflowPlaygroundSurface({
     })();
     return () => controller.abort();
   }, [hostMode, hostCanvas]);
+
+  // Planning preview: reveal the composed steps one at a time, drawn with the
+  // proposal's own projection; the proposal replaces the preview the moment
+  // it loads (the effect above resets it).
+  useEffect(() => {
+    if (!hostMode?.runId || hostCanvas) return;
+    const HOST_DRAFT_REVEAL_MS = 350;
+    const timer = window.setInterval(() => {
+      const queue = hostDraftRef.current;
+      setHostDraftShown((shown) => {
+        const count = shown.key === queue.key ? shown.count : 0;
+        if (count >= queue.steps.length) {
+          return shown.key === queue.key ? shown : { key: queue.key, count };
+        }
+        return { key: queue.key, count: count + 1 };
+      });
+    }, HOST_DRAFT_REVEAL_MS);
+    return () => window.clearInterval(timer);
+  }, [hostMode, hostCanvas]);
+
+  useEffect(() => {
+    if (!hostMode?.runId || hostCanvas || hostDraftShown.count === 0) return;
+    const queue = hostDraftRef.current;
+    if (queue.key !== hostDraftShown.key) return;
+    try {
+      restore(
+        graphFromHostCanvas(
+          hostDraftCanvas(
+            hostMode.runId,
+            queue.steps.slice(0, hostDraftShown.count),
+          ),
+          locale,
+          catalog,
+        ),
+      );
+    } catch {
+      // A preview the projection cannot draw is skipped; the proposal follows.
+    }
+  }, [catalog, hostCanvas, hostDraftShown, hostMode, locale, restore]);
 
   // Load the task text once per run. A run started from this page may not
   // exist on the host for a moment, so retry briefly; fail-soft (the generic

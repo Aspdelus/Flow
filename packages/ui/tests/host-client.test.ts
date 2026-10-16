@@ -451,6 +451,41 @@ describe('FlowHostClient', () => {
     expect(received).toEqual([phase]);
   });
 
+  it('getProgressStream keeps a plan-step frame and its step', async () => {
+    const planStep = {
+      schema_version: 'host.compose-progress.v1',
+      flow_run_id: 'run-1',
+      observed_at_utc: '2026-10-15T08:00:40+00:00',
+      step_index: 1,
+      total: 2,
+      agent_id: 'auditor',
+      status: 'plan_step',
+      progress_token: 'orchestrator.compose_plan|plan_step',
+      progress: 1,
+      kind: 'plan_step',
+      step: { step_id: 'audit', agent_id: 'auditor', inputs: ['task.goal'] },
+      revision: 1,
+      plan_scope: 'orchestrator.plan',
+    };
+    const fetchImpl = vi.fn(
+      async () =>
+        new Response(
+          `${JSON.stringify(planStep)}\n${JSON.stringify({ ...planStep, step: ['not', 'a', 'step'], kind: 'other' })}\n`,
+          { status: 200, headers: { 'Content-Type': 'application/x-ndjson' } },
+        ),
+    );
+    const client = new FlowHostClient({
+      baseUrl: 'http://127.0.0.1:9',
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    });
+    const received = [];
+    for await (const frame of client.getProgressStream('run-1')) {
+      received.push(frame);
+    }
+    const { step: _step, kind: _kind, ...rest } = planStep;
+    expect(received).toEqual([planStep, rest]);
+  });
+
   it('getProgressStream appends ?follow=true when requested', async () => {
     const fetchImpl = vi.fn(async () =>
       new Response(new ReadableStream({ start: (c) => c.close() }), {
