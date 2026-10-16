@@ -83,6 +83,8 @@ import {
 import {
   addHostPlanStep,
   applyCopilotSteps,
+  applyCopilotSubplanSteps,
+  hostCopilotSubplan,
   copilotReplyOutcome,
   beginNewRun,
   createHostClient,
@@ -2000,25 +2002,43 @@ function WorkflowPlaygroundSurface({
       setHostBusy(true);
       try {
         const client = createHostClient(hostMode);
+        // With a sub-plan (or a step inside one) selected, the request is
+        // about that sub-plan alone.
+        const subplanId = hostCopilotSubplan(hostCanvas, graph, selectedNodeId);
         const reply = await postCopilotRequest(
           client,
           hostMode.runId,
           instruction,
+          subplanId,
         );
         // The host refuses a suggestion that rewrites a step's kind and says
         // what a save would do; only one a save would accept is applied.
         const outcome = copilotReplyOutcome(reply, locale);
         if (outcome.apply && reply.suggestedSteps) {
-          // The suggestion is for the parent plan; sub-plans keep their edits.
-          const next = applyCopilotSteps(
-            hostWorkingCanvas(hostCanvas, graph),
-            locale,
-            catalog,
-            reply.suggestedSteps,
-            reply.check,
-          );
+          // Each plan keeps the edits the suggestion is not about.
+          const working = hostWorkingCanvas(hostCanvas, graph);
+          const next = reply.subplan
+            ? applyCopilotSubplanSteps(
+                working,
+                reply.subplan,
+                locale,
+                catalog,
+                reply.suggestedSteps,
+              )
+            : applyCopilotSteps(
+                working,
+                locale,
+                catalog,
+                reply.suggestedSteps,
+                reply.check,
+              );
           setHostCanvas(next.canvas);
           restore(next.graph);
+        }
+        if (reply.subplan) {
+          return locale === 'zh'
+            ? `子计划 ${reply.subplan}：${outcome.announcement}`
+            : `Sub-plan ${reply.subplan}: ${outcome.announcement}`;
         }
         return outcome.announcement;
       } catch (error) {
@@ -2027,7 +2047,7 @@ function WorkflowPlaygroundSurface({
         setHostBusy(false);
       }
     },
-    [catalog, graph, hostCanvas, hostMode, locale, restore],
+    [catalog, graph, hostCanvas, hostMode, locale, restore, selectedNodeId],
   );
 
   const requestWorkflowRun = useCallback(() => {

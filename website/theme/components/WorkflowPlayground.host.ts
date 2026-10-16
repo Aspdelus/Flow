@@ -2647,6 +2647,8 @@ export type HostCopilotReply = {
   refused: HostCopilotNotice | null;
   warnings: HostCopilotNotice[];
   check: HostCopilotCheck | null;
+  /** The sub-plan the suggestion is for (its step id); absent or `null` for the parent plan. */
+  subplan?: string | null;
 };
 
 function copilotNotice(value: unknown): HostCopilotNotice | null {
@@ -2741,11 +2743,15 @@ export async function postCopilotRequest(
   client: FlowHostClient,
   runId: string,
   instruction: string,
+  subplanId: string | null = null,
 ): Promise<HostCopilotReply> {
   if (!runId.trim()) {
     throw new HostClientError('INVALID_INPUT: runId is required');
   }
-  const { status, json } = await client.postCopilot(runId, { instruction });
+  const { status, json } = await client.postCopilot(
+    runId,
+    subplanId ? { instruction, subplan_id: subplanId } : { instruction },
+  );
   if (status < 200 || status >= 300) {
     const detail =
       json && typeof json === 'object' && 'error' in json
@@ -2768,6 +2774,7 @@ export async function postCopilotRequest(
           .filter((notice): notice is HostCopilotNotice => notice !== null)
       : [],
     check: copilotCheck(json.check),
+    subplan: typeof json.subplan === 'string' ? json.subplan : null,
   };
 }
 
@@ -2805,6 +2812,53 @@ export function applyCopilotSteps(
   const nextCanvas = check
     ? { ...edited, plan_check_problems: check.designNotes }
     : edited;
+  return {
+    canvas: nextCanvas,
+    graph: graphFromHostCanvas(nextCanvas, locale, catalog),
+  };
+}
+
+/** The sub-plan a Copilot request is about: the selected sub-plan container,
+ * or the sub-plan holding the selected step; `null` for the parent plan. */
+export function hostCopilotSubplan(
+  canvas: HostCanvasDocument,
+  graph: PlaygroundGraphState,
+  selectedNodeId: string | undefined,
+): string | null {
+  if (!selectedNodeId) return null;
+  if (canvas.subplans?.some((view) => view.step_id === selectedNodeId)) {
+    return selectedNodeId;
+  }
+  return hostSubplanOfNode(graph, selectedNodeId);
+}
+
+/** A sub-plan's suggested steps (in the sub-plan's own step ids) put on the
+ * canvas as an unsaved edit of that sub-plan; Save sends it as that
+ * sub-plan's edit. `canvas` is the working canvas (`hostWorkingCanvas`). */
+export function applyCopilotSubplanSteps(
+  canvas: HostCanvasDocument,
+  subplanId: string,
+  locale: FlowWebsiteLocale,
+  catalog: A3SFlowDagNodeCatalog,
+  suggestedSteps: JsonObject[],
+): { canvas: HostCanvasDocument; graph: PlaygroundGraphState } {
+  const nextCanvas: HostCanvasDocument = {
+    ...canvas,
+    subplans: (canvas.subplans ?? []).map((view) =>
+      view.step_id === subplanId && view.proposal
+        ? {
+            ...view,
+            proposal: {
+              ...view.proposal,
+              plan: {
+                ...(view.proposal.plan as JsonObject),
+                steps: suggestedSteps,
+              },
+            },
+          }
+        : view,
+    ),
+  };
   return {
     canvas: nextCanvas,
     graph: graphFromHostCanvas(nextCanvas, locale, catalog),

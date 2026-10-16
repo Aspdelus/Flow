@@ -21,6 +21,8 @@ import {
   createHostModeCatalog,
   createHostRunPickerExample,
   graphFromHostCanvas,
+  applyCopilotSubplanSteps,
+  hostCopilotSubplan,
   EMPTY_HOST_DRAFT,
   hostDraftCanvas,
   mergeHostDraftStep,
@@ -2987,6 +2989,48 @@ describe('WorkflowPlayground host mode: sub-plans (W26)', () => {
     expect(hostPlanSignature(hostWorkingCanvas(document, graph))).toBe(
       hostPlanSignature(document),
     );
+  });
+
+  it("puts the Copilot's suggestion for one sub-plan inside it, saved as that sub-plan's edit", () => {
+    const document = canvas();
+    const graph = graphFromHostCanvas(document, 'zh', hostCatalog());
+    // The sub-plan a request is about: its container, or a step inside it.
+    expect(hostCopilotSubplan(document, graph, 'eu')).toBe('eu');
+    expect(hostCopilotSubplan(document, graph, 'eu/fixes')).toBe('eu');
+    expect(hostCopilotSubplan(document, graph, 'summary')).toBeNull();
+    expect(hostCopilotSubplan(document, graph, undefined)).toBeNull();
+    const suggested = [
+      ...euSteps,
+      agent('verify', ['fixes.patch'], ['verdict']),
+    ] as Record<string, unknown>[];
+    const next = applyCopilotSubplanSteps(
+      hostWorkingCanvas(document, graph),
+      'eu',
+      'zh',
+      hostCatalog(),
+      suggested,
+    );
+    expect(nodeOf(next.graph, 'eu/verify')?.parentId).toBe('eu');
+    expect(
+      next.graph.edges.some(
+        (edge) => edge.source === 'eu/fixes' && edge.target === 'eu/verify',
+      ),
+    ).toBe(true);
+    // The parent plan is untouched; the save is eu's own edit.
+    const save = hostSavePlan(
+      next.canvas,
+      next.graph,
+      hostPlanSignature(document),
+      'zh',
+    );
+    expect(save.refusal).toBeNull();
+    expect(save.parentChanged).toBe(false);
+    expect(save.subplanEdits.map((edit) => edit.subplanId)).toEqual(['eu']);
+    expect(
+      (save.subplanEdits[0].canvas.plan.steps as Record<string, unknown>[]).map(
+        (step) => step.step_id,
+      ),
+    ).toEqual(['audit', 'route', 'fixes', 'ship', 'verify']);
   });
 
   it("saves an edit inside a sub-plan as that sub-plan's, out of its prefix", () => {
