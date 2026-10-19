@@ -860,3 +860,173 @@
 .a3s-run-list__error {
   color: var(--workflow-danger, #d64545);
 }
+
+/* Host mode: the selected plan step's own settings (run settings,
+   iteration / loop, condition, approval inputs), above the node's generic
+   Flow settings in the inspector. */
+.flow-playground-host-step-editor {
+  display: flex;
+  max-height: 45%;
+  flex: 0 0 auto;
+  flex-direction: column;
+  padding: 14px 14px 16px;
+  overflow-y: auto;
+  border-bottom: 1px solid var(--workflow-line);
+  background: var(--workflow-surface-muted);
+  color: var(--workflow-text);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.flow-playground-host-step-editor > * {
+  flex: none;
+}
+
+.flow-playground-host-step-editor > * + * {
+  margin-top: 12px;
+}
+
+.flow-playground-host-step-editor
+  > .flow-playground-host-step-editor__option
+  + .flow-playground-host-step-editor__option {
+  margin-top: 2px;
+}
+
+.flow-playground-host-step-editor h3 {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 680;
+  letter-spacing: -0.01em;
+}
+
+.flow-playground-host-step-editor p {
+  margin-bottom: 0;
+  color: var(--workflow-muted);
+  font-size: 11px;
+  line-height: 1.55;
+}
+
+.flow-playground-host-step-editor code {
+  color: var(--workflow-text);
+  font-family: var(--workflow-mono);
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+
+.flow-playground-host-step-editor__field {
+  display: grid;
+  min-width: 0;
+  gap: 5px;
+}
+
+.flow-playground-host-step-editor__field > span {
+  font-weight: 640;
+}
+
+.flow-playground-host-step-editor__field :where(input, select) {
+  width: 100%;
+  min-width: 0;
+  height: 36px;
+  padding: 0 10px;
+  border: 1px solid var(--workflow-line);
+  border-radius: 8px;
+  outline: none;
+  background: var(--workflow-surface);
+  color: var(--workflow-text);
+  font-size: 13px;
+  transition:
+    border-color 130ms ease-out,
+    box-shadow 130ms ease-out;
+}
+
+.flow-playground-host-step-editor__field :where(input, select):hover {
+  border-color: var(--workflow-line-strong);
+}
+
+.flow-playground-host-step-editor__field :where(input, select):focus {
+  border-color: var(--workflow-blue);
+  box-shadow: 0 0 0 3px rgb(18 100 255 / 12%);
+}
+
+/* A required choice not made yet carries an inline red outline; lay it over
+   the border instead of around it. */
+.flow-playground-host-step-editor__field select[aria-invalid='true'] {
+  outline-offset: -1px;
+}
+
+.flow-playground-host-step-editor__group {
+  display: grid;
+  min-width: 0;
+  margin-right: 0;
+  margin-left: 0;
+  padding: 4px;
+  border: 1px solid var(--workflow-line);
+  border-radius: 8px;
+  background: var(--workflow-surface);
+  gap: 2px;
+}
+
+/* Floated, the legend is the box's first row instead of sitting on its
+   border. */
+.flow-playground-host-step-editor__group > legend {
+  float: left;
+  width: 100%;
+  padding: 4px 6px 6px;
+  border-bottom: 1px solid var(--workflow-line);
+  margin-bottom: 2px;
+  font-weight: 640;
+}
+
+.flow-playground-host-step-editor__option {
+  display: flex;
+  min-width: 0;
+  padding: 5px 6px;
+  border-radius: 6px;
+  align-items: flex-start;
+  gap: 8px;
+  cursor: pointer;
+}
+
+.flow-playground-host-step-editor > .flow-playground-host-step-editor__option {
+  margin-right: -6px;
+  margin-left: -6px;
+}
+
+.flow-playground-host-step-editor__group
+  > .flow-playground-host-step-editor__option:hover {
+  background: var(--workflow-surface-muted);
+}
+
+.flow-playground-host-step-editor
+  > .flow-playground-host-step-editor__option:hover {
+  background: var(--workflow-surface-strong);
+}
+
+.flow-playground-host-step-editor__option input {
+  width: 14px;
+  height: 14px;
+  flex: none;
+  margin: 2px 0 0;
+  accent-color: var(--workflow-blue);
+  cursor: inherit;
+}
+
+.flow-playground-host-step-editor__option > :not(input) {
+  min-width: 0;
+}
+
+.flow-playground-host-step-editor__group:disabled,
+.flow-playground-host-step-editor__option:has(input:disabled) {
+  color: var(--workflow-faint);
+  cursor: not-allowed;
+}
+
+.flow-playground-host-step-editor__group:disabled
+  .flow-playground-host-step-editor__option:hover,
+.flow-playground-host-step-editor__option:has(input:disabled):hover {
+  background: transparent;
+}
+
+.flow-playground-host-step-editor__group:disabled code {
+  color: inherit;
+}
