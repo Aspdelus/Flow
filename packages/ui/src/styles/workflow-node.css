@@ -1278,6 +1278,11 @@
   color: var(--a3s-form-red);
 }
 
+/* Stopped by a cancelled run: neither a failure nor still running. */
+.a3s-form-workflow-node-preview-status[data-status="cancelled"] {
+  color: var(--a3s-form-muted);
+}
+
 .a3s-form-workflow-node-preview-body {
   position: relative;
   z-index: 2;

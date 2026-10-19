@@ -1348,6 +1348,39 @@ describe('WorkflowPlayground host mode', () => {
     expect(execution.runningStepIds).toEqual(['step-a']);
   });
 
+  it('hostRunExecutionFromSnapshot shows a cancelled run as stopped, not running or failed', () => {
+    // The host reports what a cancel interrupted as cancelled (adapters/flow-host
+    // settle_cancelled_steps, B92); an iteration still parsing reads as running
+    // until the run status says it stopped.
+    const execution = hostRunExecutionFromSnapshot({
+      status: 'cancelled',
+      steps: {
+        'agent:draft': { status: 'completed' },
+        'agent:write': { status: 'cancelled' },
+        'agent:later': { status: 'pending' },
+        'iter:each': { status: 'running' },
+      },
+    });
+    expect(execution.nodeStatuses).toMatchObject({
+      start: 'success',
+      draft: 'success',
+      write: 'cancelled',
+      later: 'cancelled',
+      each: 'cancelled',
+      done: 'cancelled',
+    });
+    expect(execution.runningStepIds).toEqual([]);
+    expect(execution.failedStepCount).toBe(0);
+    expect(execution.completedStepCount).toBe(1);
+    // A host from before that fix still says running: the run status wins.
+    const older = hostRunExecutionFromSnapshot({
+      status: 'cancelled',
+      steps: { 'agent:write': { status: 'running' } },
+    });
+    expect(older.nodeStatuses.write).toBe('cancelled');
+    expect(older.runningStepIds).toEqual([]);
+  });
+
   it('hostRunExecutionFromSnapshot marks the sink from the terminal run status', () => {
     expect(
       hostRunExecutionFromSnapshot({

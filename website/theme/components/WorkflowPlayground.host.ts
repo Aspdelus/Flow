@@ -519,8 +519,9 @@ function nodeStatusFromFlowStepStatus(status: string): HostNodeRuntimeStatus {
     case 'completed':
       return 'success';
     case 'failed':
-    case 'cancelled':
       return 'error';
+    case 'cancelled':
+      return 'cancelled';
     case 'pending':
       return 'waiting';
     default:
@@ -719,12 +720,20 @@ export function hostRunExecutionFromSnapshot(
       : []),
     ...subplanSkipped,
   ];
-  runningStepIds.sort();
   if (latest.size > 0) nodeStatuses.start = 'success';
   if (status === 'completed') nodeStatuses.done = 'success';
-  else if (status === 'failed' || status === 'cancelled') {
-    nodeStatuses.done = 'error';
+  else if (status === 'failed') nodeStatuses.done = 'error';
+  else if (status === 'cancelled') {
+    // Nothing runs or waits in a cancelled run: what was still open stopped.
+    for (const [nodeId, nodeStatus] of Object.entries(nodeStatuses)) {
+      if (nodeStatus === 'running' || nodeStatus === 'waiting') {
+        nodeStatuses[nodeId] = 'cancelled';
+      }
+    }
+    runningStepIds.length = 0;
+    nodeStatuses.done = 'cancelled';
   }
+  runningStepIds.sort();
   return {
     status,
     nodeStatuses,
