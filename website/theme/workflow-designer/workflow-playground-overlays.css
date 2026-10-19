@@ -908,3 +908,319 @@
     border-radius: 16px 16px 0 0;
   }
 }
+
+/* Failure recovery and approval gate dialogs (WorkflowPlaygroundRecoveryDialog,
+   WorkflowPlaygroundGateDialog share these classes): the trigger dialog's
+   frame, with the failed step's facts above the edit form. */
+.a3s-recovery-dialog-backdrop {
+  z-index: 120;
+  padding: 24px;
+  background: rgb(15 23 42 / 34%);
+  backdrop-filter: blur(2px);
+}
+
+.a3s-recovery-dialog {
+  display: flex;
+  width: min(600px, 100%);
+  max-height: min(760px, calc(100dvh - 48px));
+  overflow: hidden;
+  flex-direction: column;
+  border: 1px solid var(--workflow-line-strong);
+  border-radius: 16px;
+  background: var(--workflow-surface);
+  box-shadow: 0 22px 60px rgb(15 23 42 / 20%);
+  color: var(--workflow-text);
+}
+
+.a3s-recovery-dialog__header {
+  display: grid;
+  padding: 20px 24px 14px;
+  align-items: center;
+  grid-template-columns: 40px minmax(0, 1fr) 34px;
+  gap: 12px;
+  border-bottom: 1px solid var(--workflow-line);
+}
+
+.a3s-recovery-dialog__header > span {
+  display: grid;
+  width: 40px;
+  height: 40px;
+  border: 1px solid rgb(220 38 38 / 19%);
+  border-radius: 11px;
+  background: var(--workflow-red-soft);
+  color: var(--workflow-red);
+  place-items: center;
+}
+
+.a3s-recovery-dialog--gate .a3s-recovery-dialog__header > span {
+  border-color: rgb(18 100 255 / 22%);
+  background: var(--workflow-blue-soft);
+  color: var(--workflow-blue);
+}
+
+.a3s-recovery-dialog__header > span svg {
+  width: 20px;
+  height: 20px;
+}
+
+.a3s-recovery-dialog__header h2 {
+  margin: 0;
+  font-size: 17px;
+  font-weight: 720;
+  letter-spacing: -0.02em;
+  line-height: 1.25;
+}
+
+.a3s-recovery-dialog__header > button {
+  display: grid;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--workflow-muted);
+  cursor: pointer;
+  place-items: center;
+}
+
+.a3s-recovery-dialog__header > button:hover,
+.a3s-recovery-dialog__header > button:focus-visible {
+  border-color: var(--workflow-line);
+  background: var(--workflow-surface-muted);
+  color: var(--workflow-text);
+}
+
+.a3s-recovery-dialog__header > button svg {
+  width: 17px;
+  height: 17px;
+}
+
+.a3s-recovery-dialog__intro {
+  margin: 0;
+  padding: 14px 24px 0;
+  color: var(--workflow-muted);
+  font-size: 11px;
+  line-height: 1.55;
+}
+
+.a3s-recovery-dialog__facts {
+  display: grid;
+  margin: 12px 24px 0;
+  padding: 10px 12px;
+  border: 1px solid var(--workflow-line);
+  border-radius: 9px;
+  background: var(--workflow-surface-muted);
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 6px 14px;
+  font-size: 10px;
+  line-height: 1.45;
+}
+
+.a3s-recovery-dialog__facts dt {
+  color: var(--workflow-muted);
+  font-weight: 650;
+}
+
+.a3s-recovery-dialog__facts dd {
+  min-width: 0;
+  margin: 0;
+  color: var(--workflow-text);
+  font-family: var(--workflow-mono);
+  overflow-wrap: anywhere;
+}
+
+.a3s-recovery-dialog__facts summary {
+  cursor: pointer;
+}
+
+.a3s-recovery-dialog__facts pre {
+  max-height: 160px;
+  margin: 4px 0 0;
+  padding: 6px 8px;
+  overflow: auto;
+  border: 1px solid var(--workflow-line);
+  border-radius: 6px;
+  background: var(--workflow-surface);
+  font-size: 10px;
+  white-space: pre-wrap;
+}
+
+.a3s-recovery-dialog form {
+  display: flex;
+  min-height: 0;
+  padding: 14px 24px 0;
+  overflow-y: auto;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 12px;
+}
+
+/* The gate dialog has its fields straight in the section. */
+.a3s-recovery-dialog > .a3s-recovery-dialog__field {
+  margin: 14px 24px 0;
+}
+
+.a3s-recovery-dialog__field {
+  display: grid;
+  min-width: 0;
+  gap: 5px;
+}
+
+.a3s-recovery-dialog__field > span {
+  color: var(--workflow-text);
+  font-size: 10px;
+  font-weight: 650;
+}
+
+.a3s-recovery-dialog__field textarea {
+  display: block;
+  width: 100%;
+  box-sizing: border-box;
+  min-height: 64px;
+  padding: 8px 9px;
+  resize: vertical;
+  border: 1px solid var(--workflow-line);
+  border-radius: 7px;
+  outline: none;
+  background: var(--workflow-surface);
+  color: var(--workflow-text);
+  font: 11px/1.45 var(--workflow-sans);
+}
+
+.a3s-recovery-dialog__field textarea:focus {
+  border-color: var(--workflow-blue);
+  box-shadow: 0 0 0 3px rgb(18 100 255 / 12%);
+}
+
+.a3s-recovery-dialog__field .a3s-flow-select-control {
+  display: block;
+  width: 100%;
+}
+
+.a3s-recovery-dialog__field .a3s-flow-select-control > button {
+  display: flex;
+  width: 100%;
+  min-height: 36px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 9px;
+  border: 1px solid var(--workflow-line);
+  border-radius: 7px;
+  outline: none;
+  background: var(--workflow-surface);
+  color: var(--workflow-text);
+  font: 11px/1.4 var(--workflow-sans);
+  text-align: start;
+}
+
+.a3s-recovery-dialog__field .a3s-flow-select-control > button:hover:not(:disabled),
+.a3s-recovery-dialog__field .a3s-flow-select-control > button[aria-expanded='true'],
+.a3s-recovery-dialog__field .a3s-flow-select-control > button:focus-visible {
+  border-color: var(--workflow-blue);
+}
+
+.a3s-recovery-dialog__field .a3s-flow-select-control > button > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.a3s-recovery-dialog__field .a3s-flow-select-control > [data-popover] {
+  width: 100%;
+  max-height: 190px;
+  border-color: var(--workflow-line);
+  background: var(--workflow-surface);
+}
+
+.a3s-recovery-dialog__field .a3s-flow-select-control [role='option'] {
+  color: var(--workflow-text);
+  font: 11px/1.4 var(--workflow-sans);
+}
+
+.a3s-recovery-dialog__error {
+  margin: 0;
+  padding: 8px 10px;
+  border: 1px solid rgb(220 38 38 / 19%);
+  border-radius: 7px;
+  background: var(--workflow-red-soft);
+  color: var(--workflow-red);
+  font-size: 10px;
+  line-height: 1.4;
+}
+
+.a3s-recovery-dialog > .a3s-recovery-dialog__error {
+  margin: 10px 24px 0;
+}
+
+.a3s-recovery-dialog__footer {
+  display: flex;
+  margin: 14px -24px 0;
+  padding: 12px 24px;
+  border-top: 1px solid var(--workflow-line);
+  align-items: center;
+  justify-content: flex-end;
+  gap: 7px;
+}
+
+.a3s-recovery-dialog > .a3s-recovery-dialog__footer {
+  margin: 14px 0 0;
+}
+
+.a3s-recovery-dialog__footer button {
+  display: inline-flex;
+  min-height: 36px;
+  padding: 0 13px;
+  border: 1px solid var(--workflow-line);
+  border-radius: 7px;
+  background: var(--workflow-surface);
+  color: var(--workflow-text);
+  font-size: 10px;
+  font-weight: 680;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+}
+
+.a3s-recovery-dialog__footer button:hover,
+.a3s-recovery-dialog__footer button:focus-visible {
+  border-color: var(--workflow-line-strong);
+  background: var(--workflow-surface-muted);
+}
+
+.a3s-recovery-dialog__footer button:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
+.a3s-recovery-dialog__submit {
+  border-color: var(--workflow-blue) !important;
+  background: var(--workflow-blue) !important;
+  color: #ffffff !important;
+}
+
+.a3s-recovery-dialog__submit:hover,
+.a3s-recovery-dialog__submit:focus-visible {
+  border-color: var(--workflow-blue-dark) !important;
+  background: var(--workflow-blue-dark) !important;
+}
+
+.a3s-recovery-dialog__submit svg {
+  width: 13px;
+  height: 13px;
+}
+
+@media (max-width: 520px) {
+  .a3s-recovery-dialog-backdrop {
+    padding: 0;
+    align-items: end;
+  }
+
+  .a3s-recovery-dialog {
+    width: 100%;
+    max-height: 94dvh;
+    border-radius: 16px 16px 0 0;
+  }
+}

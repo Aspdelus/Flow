@@ -104,7 +104,7 @@ export function WorkflowPlaygroundGateDialog({
         aria-describedby={descriptionId}
         aria-labelledby={titleId}
         aria-modal="true"
-        className="a3s-recovery-dialog"
+        className="a3s-recovery-dialog a3s-recovery-dialog--gate"
         data-testid="gate-dialog"
         ref={dialogRef}
         role="dialog"
