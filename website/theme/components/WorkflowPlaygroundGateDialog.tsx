@@ -19,7 +19,8 @@ const INPUT_PREVIEW_CHARS = 1200;
  * `gate:<step_id>` hook until a human approves the upstream outputs it lists
  * (adapters/flow-host `control_flow.rs`). This dialog shows what to check and
  * those outputs, and submits one `host.gate-approval.v1` decision -- approve
- * continues the run, reject ends it at this gate.
+ * continues the run, reject ends it (or, for a sub-plan's gate, that
+ * sub-plan) at this gate.
  *
  * Modal structure/focus-trap pattern copied from
  * WorkflowPlaygroundRecoveryDialog.tsx.
@@ -79,9 +80,20 @@ export function WorkflowPlaygroundGateDialog({
 
   const zh = locale === 'zh';
   const title = zh ? '人工审批' : 'Human approval';
+  // A sub-plan's gate is `<subplan>/<step>`: rejecting it ends only that
+  // sub-plan and the run goes on (adapters/flow-host subplan.rs SUBPLAN_REJECTED).
+  const slash = gate.step_id.indexOf('/');
+  const subplan = slash > 0 ? gate.step_id.slice(0, slash) : '';
+  const rejectEffect = subplan
+    ? zh
+      ? `驳回会在这里结束子计划 ${subplan}，运行的其他部分继续。`
+      : `reject to end sub-plan ${subplan} at this step; the rest of the run goes on.`
+    : zh
+      ? '驳回会在这里结束本次运行。'
+      : 'reject to end the run at this step.';
   const description = zh
-    ? '计划在这一步暂停，等你确认上游产出后再继续。批准后继续执行后续步骤；驳回会在这里结束本次运行。'
-    : 'The plan pauses here until you confirm the upstream outputs. Approve to run the remaining steps; reject to end the run at this step.';
+    ? `计划在这一步暂停，等你确认上游产出后再继续。批准后继续执行后续步骤；${rejectEffect}`
+    : `The plan pauses here until you confirm the upstream outputs. Approve to run the remaining steps; ${rejectEffect}`;
   const checkLabel = zh ? '需要确认' : 'What to check';
   const inputsLabel = zh ? '待审内容' : 'Outputs to review';
   const commentLabel = zh ? '意见（可选）' : 'Comment (optional)';
