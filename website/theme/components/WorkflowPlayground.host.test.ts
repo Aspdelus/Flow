@@ -41,6 +41,7 @@ import {
   hostWorkingCanvas,
   hostRewireOtherwise,
   hostRunExecutionFromSnapshot,
+  hostNodeDetailText,
   hostStepOutputOptions,
   hostUnsavedNodes,
   hostWithApprovalInputs,
@@ -1440,6 +1441,7 @@ describe('WorkflowPlayground host mode', () => {
       openGateStepId: null,
       completedStepCount: 0,
       failedStepCount: 0,
+      nodeDetails: {},
     });
   });
 
@@ -2077,6 +2079,55 @@ describe('WorkflowPlayground host mode: iterations', () => {
     });
     expect([done.completedStepCount, done.failedStepCount]).toEqual([1, 1]);
   });
+
+  it('says how many items are done, and how many failed', () => {
+    // Each body instance's input names its iteration (lib.rs worker["iteration"]).
+    const item = (index: number, status: string) => ({
+      status,
+      input: {
+        iteration: {
+          id: 'each',
+          kind: 'iteration',
+          index,
+          body: ['quote', 'check'],
+        },
+      },
+    });
+    const items = {
+      status: 'completed',
+      output: { items: ['a.jsx', 'b.jsx', 'c.jsx'] },
+    };
+    const running = hostRunExecutionFromSnapshot({
+      status: 'running',
+      steps: {
+        'iter:each': items,
+        'agent:quote@0': item(0, 'completed'),
+        'agent:check@0': item(0, 'completed'),
+        // Item 1's check has not started: the item is not done yet.
+        'agent:quote@1': item(1, 'completed'),
+      },
+    });
+    expect(running.nodeDetails.each).toMatchObject({ count: 1, total: 3 });
+    expect(hostNodeDetailText(running.nodeDetails.each, 'zh')).toBe('1/3 项');
+    const done = hostRunExecutionFromSnapshot({
+      status: 'completed',
+      steps: {
+        'iter:each': items,
+        'agent:quote@0': item(0, 'completed'),
+        'agent:check@0': item(0, 'completed'),
+        'agent:quote@1': item(1, 'failed'),
+        'agent:quote@2': item(2, 'completed'),
+        'agent:check@2': item(2, 'completed'),
+        'iter:each.results': { status: 'completed' },
+      },
+    });
+    expect(hostNodeDetailText(done.nodeDetails.each, 'zh')).toBe(
+      '3 项，1 项失败',
+    );
+    expect(hostNodeDetailText(done.nodeDetails.each, 'en')).toBe(
+      '3 items, 1 failed',
+    );
+  });
 });
 
 describe('WorkflowPlayground host mode: loops', () => {
@@ -2169,6 +2220,24 @@ describe('WorkflowPlayground host mode: loops', () => {
       steps: { 'loop:refine@0': { status: 'failed' } },
     });
     expect(broken.nodeStatuses.refine).toBe('error');
+  });
+
+  it('says how many rounds a loop ran', () => {
+    const passed = hostRunExecutionFromSnapshot({
+      status: 'completed',
+      steps: {
+        'loop:refine@0': { status: 'completed' },
+        'loop:refine': {
+          status: 'completed',
+          output: { status: 'passed', rounds: 2 },
+        },
+      },
+    });
+    expect(passed.nodeStatuses.refine).toBe('success');
+    expect(hostNodeDetailText(passed.nodeDetails.refine, 'zh')).toBe('2 轮');
+    expect(hostNodeDetailText(passed.nodeDetails.refine, 'en')).toBe(
+      '2 rounds',
+    );
   });
 });
 

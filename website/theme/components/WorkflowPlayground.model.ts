@@ -25,6 +25,7 @@ export type PlaygroundNodeData = {
   internal: boolean;
   container: boolean;
   runtimeStatus?: 'idle' | 'running' | 'success' | 'waiting' | 'error' | 'cancelled' | 'rejected' | 'timedOut';
+  runtimeDetail?: string;
   onRun?: (nodeId: string) => void;
   onDuplicate?: (nodeId: string) => void;
   onDelete?: (nodeId: string) => void;

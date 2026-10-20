@@ -19,6 +19,8 @@ export interface WorkflowNodePreviewProps {
   locale?: string;
   technical?: boolean;
   status?: WorkflowNodePreviewStatus;
+  /** Shown after the status, e.g. how many rounds or items a container ran. */
+  statusDetail?: string;
   summary?: readonly WorkflowNodePreviewSummaryItem[];
   onSelect?: () => void;
   onRequestNext?: (port: WorkflowNodePreviewPort) => void;
@@ -276,12 +278,15 @@ export function WorkflowNodePreview({
   locale = "en",
   technical = true,
   status = "idle",
+  statusDetail,
   summary = [],
   onSelect,
   onRequestNext,
 }: WorkflowNodePreviewProps) {
   const chinese = locale.toLocaleLowerCase().startsWith("zh");
   const copy = previewCopy(chinese);
+  const statusLabel = status === "idle" ? "" : copy.status[status];
+  const statusText = statusDetail ? `${statusLabel} · ${statusDetail}` : statusLabel;
   const inputs = ports?.inputs ?? inputPorts(node);
   const outputs = ports?.outputs ?? outputPorts(node);
   const runtimeBinding =
@@ -363,11 +368,11 @@ export function WorkflowNodePreview({
           <span
             className="a3s-form-workflow-node-preview-status"
             data-status={status}
-            aria-label={copy.status[status]}
+            aria-label={statusText}
             role="status"
           >
             <i aria-hidden="true" />
-            <span>{copy.status[status]}</span>
+            <span>{statusText}</span>
           </span>
         )}
         {(node.beta || node.legacy) && (

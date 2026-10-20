@@ -117,6 +117,7 @@ import {
   loadHostRecoveryFailure,
   submitGateDecision,
   loadHostRunExecution,
+  hostNodeDetailText,
   loadHostRunTaskText,
   pendingRunStart,
   postCopilotRequest,
@@ -1405,6 +1406,19 @@ function WorkflowPlaygroundSurface({
     [viewExecution, running, statuses],
   );
 
+  const displayDetails = useMemo(
+    () =>
+      viewExecution && !running
+        ? Object.fromEntries(
+            Object.entries(viewExecution.nodeDetails).map(([id, progress]) => [
+              id,
+              hostNodeDetailText(progress, locale),
+            ]),
+          )
+        : undefined,
+    [viewExecution, running, locale],
+  );
+
   const { displayEdges, displayNodes } = useWorkflowPlaygroundElements({
     beginEdit: beginDrag,
     beginEdgeLabelEdit,
@@ -1430,6 +1444,7 @@ function WorkflowPlaygroundSurface({
     editingEdgeId,
     selectedNodeId,
     statuses: displayStatuses,
+    details: displayDetails,
   });
 
   const resetWorkflow = useCallback(() => {

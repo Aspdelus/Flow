@@ -40,6 +40,8 @@ export type WorkflowPlaygroundElementsOptions = {
   editingEdgeId?: string;
   selectedNodeId?: string;
   statuses: Readonly<Record<string, PlaygroundNode['data']['runtimeStatus']>>;
+  /** Text after a node's status (a host run's rounds or items). */
+  details?: Readonly<Record<string, string>>;
 };
 
 type PlaygroundRuntimeStatus = NonNullable<
@@ -53,6 +55,7 @@ type NodeCacheEntry = {
   selected: boolean;
   source: PlaygroundNode;
   status: PlaygroundRuntimeStatus;
+  detail: string | undefined;
   value: PlaygroundNode;
 };
 
@@ -152,6 +155,7 @@ export function reconcileWorkflowPlaygroundElements(
     editingEdgeId,
     selectedNodeId,
     statuses,
+    details,
   }: WorkflowPlaygroundElementsOptions,
   cache: WorkflowPlaygroundElementCache,
 ): { displayEdges: PlaygroundEdge[]; displayNodes: PlaygroundCanvasNode[] } {
@@ -160,11 +164,13 @@ export function reconcileWorkflowPlaygroundElements(
     nodeIds.add(node.id);
     const selected = node.id === selectedNodeId;
     const status = statuses[node.id] ?? 'idle';
+    const detail = details?.[node.id];
     const previous = cache.nodes.get(node.id);
     if (
       previous?.source === node &&
       previous.selected === selected &&
       previous.status === status &&
+      previous.detail === detail &&
       previous.onRun === onRunNode &&
       previous.onDuplicate === onDuplicateNode &&
       previous.onDelete === onDeleteNode
@@ -178,6 +184,7 @@ export function reconcileWorkflowPlaygroundElements(
       data: {
         ...node.data,
         runtimeStatus: status,
+        runtimeDetail: detail,
         onRun: onRunNode,
         onDuplicate: onDuplicateNode,
         onDelete: onDeleteNode,
@@ -190,6 +197,7 @@ export function reconcileWorkflowPlaygroundElements(
       selected,
       source: node,
       status,
+      detail,
       value,
     });
     return value;
@@ -397,6 +405,7 @@ export function useWorkflowPlaygroundElements({
   editingEdgeId,
   selectedNodeId,
   statuses,
+  details,
 }: WorkflowPlaygroundElementsOptions) {
   const cache = useRef<WorkflowPlaygroundElementCache | undefined>(undefined);
   const elementCache =
@@ -430,6 +439,7 @@ export function useWorkflowPlaygroundElements({
           editingEdgeId,
           selectedNodeId,
           statuses,
+          details,
         },
         elementCache,
       ),
@@ -469,6 +479,7 @@ export function useWorkflowPlaygroundElements({
       editingEdgeId,
       selectedNodeId,
       statuses,
+      details,
     ],
   );
 }

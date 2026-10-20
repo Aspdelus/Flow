@@ -83,6 +83,20 @@ describe('Workflow Playground element reconciliation', () => {
       first.displayNodes[stableNodeIndex],
     );
     expect(statusUpdate.displayEdges).toBe(first.displayEdges);
+    // Only the text after the status changed (a loop moved to round 2).
+    const detailed = (round: string) =>
+      reconcileWorkflowPlaygroundElements(
+        {
+          ...base,
+          statuses: { [updatedNodeId]: 'success' },
+          details: { [updatedNodeId]: round },
+        },
+        cache,
+      ).displayNodes[updatedNodeIndex].data.runtimeDetail;
+    expect([detailed('第 1 轮'), detailed('第 2 轮')]).toEqual([
+      '第 1 轮',
+      '第 2 轮',
+    ]);
 
     const movedGraph = {
       ...graph,

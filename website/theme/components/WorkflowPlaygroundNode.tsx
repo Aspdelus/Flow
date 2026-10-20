@@ -112,6 +112,7 @@ function WorkflowPlaygroundNodeComponent({
         manifest={manifest}
         selected={selected}
         status={data.runtimeStatus ?? 'idle'}
+        statusDetail={data.runtimeDetail}
       />
 
       {data.container && (

@@ -485,7 +485,55 @@ export type HostRunExecution = {
   openGateStepId: string | null;
   completedStepCount: number;
   failedStepCount: number;
+  /** How far each iteration / loop got (see {@link hostNodeDetailText}). */
+  nodeDetails: Record<string, HostScopeProgress>;
 };
+
+/** Rounds a loop ran, or items of an iteration done out of all. */
+export type HostScopeProgress = {
+  kind: 'iteration' | 'loop';
+  count: number;
+  total?: number;
+  failed: number;
+  ended: boolean;
+};
+
+/** One iteration's or loop's Flow steps, gathered from a snapshot. */
+type HostScopeRun = {
+  kind: 'iteration' | 'loop';
+  /** Item index / round -> its body instances' statuses. */
+  instances: Map<number, HostNodeRuntimeStatus[]>;
+  bodySize: number;
+  items?: HostNodeRuntimeStatus;
+  total?: number;
+  rounds: HostNodeRuntimeStatus[];
+  result?: HostNodeRuntimeStatus;
+  roundCount?: number;
+};
+
+/** The text after a container's status: "第 2 轮", "3/4 项", ... */
+export function hostNodeDetailText(
+  progress: HostScopeProgress,
+  locale: FlowWebsiteLocale,
+): string {
+  const zh = locale === 'zh';
+  if (progress.kind === 'loop') {
+    const n = progress.count;
+    if (!progress.ended) return zh ? `第 ${n} 轮` : `round ${n}`;
+    return zh ? `${n} 轮` : n === 1 ? '1 round' : `${n} rounds`;
+  }
+  const items = progress.ended
+    ? zh
+      ? `${progress.total} 项`
+      : `${progress.total} items`
+    : zh
+      ? `${progress.count}/${progress.total} 项`
+      : `${progress.count}/${progress.total} items`;
+  if (!progress.failed) return items;
+  return zh
+    ? `${items}，${progress.failed} 项失败`
+    : `${items}, ${progress.failed} failed`;
+}
 
 /** Flow run statuses under which the run is still moving on its own, so
  * polling its snapshot can observe further change. `suspended` is excluded
@@ -588,29 +636,62 @@ export function hostRunExecutionFromSnapshot(
     if (nodeStatus === 'success') completedStepCount += 1;
   }
   // A body step reads as all its items together: running while any runs,
-  // failed if any item failed, done once every dispatched item is.
+  // failed if any item failed, done once every dispatched item is.  Each
+  // instance's input names its iteration or loop and item / round.
   const bodyItems = new Map<string, string[]>();
-  const iterationParts = new Map<
-    string,
-    { items?: string; results?: string }
-  >();
+  const scopes = new Map<string, HostScopeRun>();
+  const scopeOf = (id: string, kind: 'iteration' | 'loop') => {
+    const scope = scopes.get(id) ?? {
+      kind,
+      instances: new Map<number, HostNodeRuntimeStatus[]>(),
+      bodySize: 0,
+      rounds: [],
+    };
+    scopes.set(id, scope);
+    return scope;
+  };
   for (const [flowStepId, step] of Object.entries(steps)) {
     if (!isRecord(step) || typeof step.status !== 'string') continue;
+    const nodeStatus = nodeStatusFromFlowStepStatus(step.status);
     const body = BODY_FLOW_STEP_ID.exec(flowStepId);
     if (body) {
-      bodyItems.set(body[1], [
-        ...(bodyItems.get(body[1]) ?? []),
-        nodeStatusFromFlowStepStatus(step.status),
-      ]);
+      bodyItems.set(body[1], [...(bodyItems.get(body[1]) ?? []), nodeStatus]);
+      const where = isRecord(step.input) ? step.input.iteration : undefined;
+      if (
+        isRecord(where) &&
+        typeof where.id === 'string' &&
+        (where.kind === 'iteration' || where.kind === 'loop')
+      ) {
+        const scope = scopeOf(where.id, where.kind);
+        const index = Number(body[2]);
+        scope.instances.set(index, [
+          ...(scope.instances.get(index) ?? []),
+          nodeStatus,
+        ]);
+        if (Array.isArray(where.body)) scope.bodySize = where.body.length;
+      }
       continue;
     }
     const iteration = ITERATION_FLOW_STEP_ID.exec(flowStepId);
     if (iteration) {
-      const parts = iterationParts.get(iteration[1]) ?? {};
-      parts[iteration[2] ? 'results' : 'items'] = nodeStatusFromFlowStepStatus(
-        step.status,
-      );
-      iterationParts.set(iteration[1], parts);
+      const scope = scopeOf(iteration[1], 'iteration');
+      if (iteration[2]) scope.result = nodeStatus;
+      else {
+        scope.items = nodeStatus;
+        if (isRecord(step.output) && Array.isArray(step.output.items))
+          scope.total = step.output.items.length;
+      }
+      continue;
+    }
+    const loop = LOOP_FLOW_STEP_ID.exec(flowStepId);
+    if (loop) {
+      const scope = scopeOf(loop[1], 'loop');
+      if (loop[2]) scope.rounds.push(nodeStatus);
+      else {
+        scope.result = nodeStatus;
+        if (isRecord(step.output) && typeof step.output.rounds === 'number')
+          scope.roundCount = step.output.rounds;
+      }
     }
   }
   for (const [stepId, statuses] of bodyItems) {
@@ -626,39 +707,49 @@ export function hostRunExecutionFromSnapshot(
     if (nodeStatus === 'success') completedStepCount += 1;
     if (nodeStatus === 'error') failedStepCount += 1;
   }
-  const loopParts = new Map<
-    string,
-    { rounds: HostNodeRuntimeStatus[]; result?: HostNodeRuntimeStatus }
-  >();
-  for (const [flowStepId, step] of Object.entries(steps)) {
-    const loop = LOOP_FLOW_STEP_ID.exec(flowStepId);
-    if (!loop || !isRecord(step) || typeof step.status !== 'string') continue;
-    const parts = loopParts.get(loop[1]) ?? { rounds: [] };
-    if (loop[2]) parts.rounds.push(nodeStatusFromFlowStepStatus(step.status));
-    else parts.result = nodeStatusFromFlowStepStatus(step.status);
-    loopParts.set(loop[1], parts);
-  }
-  for (const [stepId, { rounds, result }] of loopParts) {
+  const nodeDetails: Record<string, HostScopeProgress> = {};
+  for (const [stepId, scope] of scopes) {
+    // Shown once the host recorded one of its own steps.
+    if (!scope.items && !scope.result && scope.rounds.length === 0) continue;
+    const instances = [...scope.instances.values()];
+    const failed = instances.filter((item) => item.includes('error')).length;
     const nodeStatus: HostNodeRuntimeStatus =
-      result === 'success'
-        ? 'success'
-        : result === 'error' || rounds.includes('error')
-          ? 'error'
+      scope.result === 'error' ||
+      scope.items === 'error' ||
+      scope.rounds.includes('error')
+        ? 'error'
+        : scope.result === 'success'
+          ? 'success'
           : 'running';
     nodeStatuses[stepId] = nodeStatus;
-    nodeStatuses[hostLoopStartId(stepId)] = nodeStatus;
-    if (nodeStatus === 'success') completedStepCount += 1;
-  }
-  for (const [stepId, { items, results }] of iterationParts) {
-    const nodeStatus: HostNodeRuntimeStatus =
-      results === 'success'
-        ? 'success'
-        : items === 'error' || results === 'error'
-          ? 'error'
-          : 'running';
-    nodeStatuses[stepId] = nodeStatus;
-    nodeStatuses[hostIterationStartId(stepId)] =
-      items === 'success' ? 'success' : nodeStatus;
+    if (scope.kind === 'loop') {
+      nodeStatuses[hostLoopStartId(stepId)] = nodeStatus;
+      const started = Math.max(
+        scope.rounds.length,
+        ...[...scope.instances.keys()].map((round) => round + 1),
+      );
+      nodeDetails[stepId] = {
+        kind: 'loop',
+        count: scope.roundCount ?? started,
+        ended: scope.result === 'success',
+        failed: 0,
+      };
+    } else {
+      nodeStatuses[hostIterationStartId(stepId)] =
+        scope.items === 'success' ? 'success' : nodeStatus;
+      if (scope.total !== undefined)
+        nodeDetails[stepId] = {
+          kind: 'iteration',
+          count: instances.filter(
+            (item) =>
+              item.length === scope.bodySize &&
+              item.every((status) => status === 'success'),
+          ).length,
+          total: scope.total,
+          ended: scope.result === 'success',
+          failed,
+        };
+    }
     if (nodeStatus === 'success') completedStepCount += 1;
   }
   // A sub-plan node runs while any of its steps do and ends with `subplan:<id>`.
@@ -757,6 +848,7 @@ export function hostRunExecutionFromSnapshot(
     openGateStepId,
     completedStepCount,
     failedStepCount,
+    nodeDetails,
   };
 }
 

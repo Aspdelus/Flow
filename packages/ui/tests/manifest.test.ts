@@ -359,6 +359,19 @@ describe("A3S Flow authoring manifests", () => {
       String(manifest.ports.inputs.length + manifest.ports.outputs.length),
     );
     preview.unmount();
+
+    // A run's status, and what it adds (a container's rounds or items).
+    const running = render(
+      createElement(A3SFlowDagNodePreview, {
+        dagNode,
+        locale: "zh-CN",
+        manifest,
+        status: "timedOut",
+        statusDetail: "第 2 轮",
+      }),
+    );
+    expect(running.getByRole("status").textContent).toBe("已超时 · 第 2 轮");
+    running.unmount();
   });
 
   it("keeps the condition payload behind advanced disclosure", () => {
