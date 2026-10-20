@@ -1359,7 +1359,7 @@ describe('WorkflowPlayground host mode', () => {
 
   it('hostRunExecutionFromSnapshot shows a cancelled run as stopped, not running or failed', () => {
     // The host reports what a cancel interrupted as cancelled (adapters/flow-host
-    // settle_cancelled_steps, B92); an iteration still parsing reads as running
+    // settle_cancelled_run, B92); an iteration still parsing reads as running
     // until the run status says it stopped.
     const execution = hostRunExecutionFromSnapshot({
       status: 'cancelled',
@@ -1388,6 +1388,18 @@ describe('WorkflowPlayground host mode', () => {
     });
     expect(older.nodeStatuses.write).toBe('cancelled');
     expect(older.runningStepIds).toEqual([]);
+    // Cancelled while a gate waited: nobody reviews it any more (B105).
+    for (const status of ['cancelled', 'active']) {
+      const atGate = hostRunExecutionFromSnapshot({
+        status: 'cancelled',
+        steps: { 'agent:draft': { status: 'completed' } },
+        hooks: { 'gate:signoff': { status } },
+      });
+      expect([atGate.nodeStatuses.signoff, atGate.openGateStepId]).toEqual([
+        'cancelled',
+        null,
+      ]);
+    }
   });
 
   it('hostRunExecutionFromSnapshot shows a gate a reviewer rejected, and the run it stopped, as rejected', () => {

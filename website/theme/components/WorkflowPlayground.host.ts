@@ -814,6 +814,9 @@ export function hostRunExecutionFromSnapshot(
       const rejected = isRecord(hook.payload) && hook.payload.approved === false;
       nodeStatuses[match[1]] = rejected ? 'rejected' : 'success';
       if (!rejected) completedStepCount += 1;
+    } else if (hookStatus === 'cancelled') {
+      // The run was cancelled while this gate waited (host settle_cancelled_run).
+      nodeStatuses[match[1]] = 'cancelled';
     }
   }
   // The fail step that ended the run, and those that ended a sub-plan.
@@ -869,6 +872,7 @@ export function hostRunExecutionFromSnapshot(
       }
     }
     runningStepIds.length = 0;
+    openGateStepId = null;
     nodeStatuses.done = 'cancelled';
   }
   runningStepIds.sort();
