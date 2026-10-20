@@ -431,6 +431,9 @@ export function isProposalNotYetReady(error: unknown): boolean {
 export type HostRunSummary = {
   runId: string;
   status: string;
+  /** How a finished run ended (its output's `status`), e.g. `rejected_at_gate`
+   * for a run Flow completed after a reviewer said no; '' while unknown. */
+  outcome: string;
   taskText: string | null;
 };
 
@@ -447,6 +450,7 @@ export async function listHostRuns(
     .map((entry) => ({
       runId: typeof entry.run_id === 'string' ? entry.run_id : '',
       status: typeof entry.status === 'string' ? entry.status : 'Unknown',
+      outcome: typeof entry.outcome === 'string' ? entry.outcome : '',
       taskText: typeof entry.task_text === 'string' ? entry.task_text : null,
     }))
     .filter((run) => run.runId !== '');
@@ -469,6 +473,9 @@ export type HostNodeRuntimeStatus = NonNullable<
  */
 export type HostRunExecution = {
   status: string;
+  /** The run output's `status` once it ended ('' before): `rejected_at_gate`
+   * when a reviewer rejected a gate (Flow still says completed). */
+  outcome: string;
   nodeStatuses: Record<string, HostNodeRuntimeStatus>;
   /** Plan step ids whose latest attempt is running right now. */
   runningStepIds: string[];
@@ -700,8 +707,10 @@ export function hostRunExecutionFromSnapshot(
       nodeStatuses[match[1]] = 'waiting';
       openGateStepId = match[1];
     } else if (hookStatus === 'received') {
-      nodeStatuses[match[1]] = 'success';
-      completedStepCount += 1;
+      // A rejection is a decision too, but the run stopped there.
+      const rejected = isRecord(hook.payload) && hook.payload.approved === false;
+      nodeStatuses[match[1]] = rejected ? 'rejected' : 'success';
+      if (!rejected) completedStepCount += 1;
     }
   }
   // A plan's fail step records `FAILED_BY_PLAN <step_id>: <reason>`
@@ -721,7 +730,9 @@ export function hostRunExecutionFromSnapshot(
     ...subplanSkipped,
   ];
   if (latest.size > 0) nodeStatuses.start = 'success';
-  if (status === 'completed') nodeStatuses.done = 'success';
+  const outcome = typeof output.status === 'string' ? output.status : '';
+  if (outcome === 'rejected_at_gate') nodeStatuses.done = 'rejected';
+  else if (status === 'completed') nodeStatuses.done = 'success';
   else if (status === 'failed') nodeStatuses.done = 'error';
   else if (status === 'cancelled') {
     // Nothing runs or waits in a cancelled run: what was still open stopped.
@@ -736,6 +747,7 @@ export function hostRunExecutionFromSnapshot(
   runningStepIds.sort();
   return {
     status,
+    outcome,
     nodeStatuses,
     runningStepIds,
     skippedStepIds,

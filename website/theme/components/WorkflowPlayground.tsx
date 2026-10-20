@@ -2298,7 +2298,9 @@ function WorkflowPlaygroundSurface({
             : undefined
         }
         hostFlowStatus={
-          hostExecution?.status
+          hostExecution?.outcome === 'rejected_at_gate'
+            ? hostExecution.outcome
+            : hostExecution?.status
             ? hostExecution.status
             : typeof hostCanvas?.flow_status === 'string'
               ? hostCanvas.flow_status

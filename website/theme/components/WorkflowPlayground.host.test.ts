@@ -328,6 +328,12 @@ describe('WorkflowPlayground host mode', () => {
                 task_text: 'review the docs',
               },
               { run_id: 'run-2', status: 'Running', task_text: null },
+              {
+                run_id: 'run-3',
+                status: 'completed',
+                task_text: 'ship it',
+                outcome: 'rejected_at_gate',
+              },
               { not_a_run_id: 'nope' },
             ],
           }),
@@ -343,8 +349,9 @@ describe('WorkflowPlayground host mode', () => {
         principalRef: 'reviewer@local',
       });
       expect(runs).toEqual([
-        { runId: 'run-1', status: 'Suspended', taskText: 'review the docs' },
-        { runId: 'run-2', status: 'Running', taskText: null },
+        { runId: 'run-1', status: 'Suspended', outcome: '', taskText: 'review the docs' },
+        { runId: 'run-2', status: 'Running', outcome: '', taskText: null },
+        { runId: 'run-3', status: 'completed', outcome: 'rejected_at_gate', taskText: 'ship it' },
       ]);
       expect(fetchImpl).toHaveBeenCalledWith(
         'http://127.0.0.1:9/v1/runs',
@@ -1381,6 +1388,27 @@ describe('WorkflowPlayground host mode', () => {
     expect(older.runningStepIds).toEqual([]);
   });
 
+  it('hostRunExecutionFromSnapshot shows a gate a reviewer rejected, and the run it stopped, as rejected', () => {
+    // Flow completes the run; its output says rejected_at_gate (B94).
+    const execution = hostRunExecutionFromSnapshot({
+      status: 'completed',
+      steps: { 'agent:review': { status: 'completed' } },
+      hooks: {
+        'gate:signoff': { status: 'received', payload: { approved: false, comment: 'not yet' } },
+        'gate:earlier': { status: 'received', payload: { approved: true } },
+      },
+      output: { status: 'rejected_at_gate' },
+    });
+    expect(execution.outcome).toBe('rejected_at_gate');
+    expect(execution.nodeStatuses).toMatchObject({
+      review: 'success',
+      signoff: 'rejected',
+      earlier: 'success',
+      done: 'rejected',
+    });
+    expect(execution.completedStepCount).toBe(2);
+  });
+
   it('hostRunExecutionFromSnapshot marks the sink from the terminal run status', () => {
     expect(
       hostRunExecutionFromSnapshot({
@@ -1405,6 +1433,7 @@ describe('WorkflowPlayground host mode', () => {
     ).toEqual({});
     expect(hostRunExecutionFromSnapshot(null)).toEqual({
       status: '',
+      outcome: '',
       nodeStatuses: {},
       runningStepIds: [],
       skippedStepIds: [],

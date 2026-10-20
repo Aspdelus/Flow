@@ -18,6 +18,8 @@ const STATUS_LABEL: Readonly<Record<string, { zh: string; en: string }>> = {
   completed: { zh: '已完成', en: 'Completed' },
   failed: { zh: '失败', en: 'Failed' },
   cancelled: { zh: '已取消', en: 'Cancelled' },
+  // Not a Flow status: the run output's, for a run a reviewer rejected at a gate.
+  rejected_at_gate: { zh: '已驳回', en: 'Rejected' },
   continued_as_new: { zh: '已续期', en: 'Continued' },
 };
 
@@ -151,7 +153,7 @@ export function WorkflowPlaygroundRunList({
                 <span>
                   <strong>{run.runId}</strong>
                   <span className="a3s-run-list__status">
-                    {statusLabel(run.status, locale)}
+                    {statusLabel(run.outcome === 'rejected_at_gate' ? run.outcome : run.status, locale)}
                   </span>
                   {run.taskText && (
                     <span className="a3s-run-list__task">{run.taskText}</span>

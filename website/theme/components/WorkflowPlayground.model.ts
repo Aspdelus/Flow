@@ -24,7 +24,7 @@ export type PlaygroundNodeData = {
   locale: FlowWebsiteLocale;
   internal: boolean;
   container: boolean;
-  runtimeStatus?: 'idle' | 'running' | 'success' | 'waiting' | 'error' | 'cancelled';
+  runtimeStatus?: 'idle' | 'running' | 'success' | 'waiting' | 'error' | 'cancelled' | 'rejected';
   onRun?: (nodeId: string) => void;
   onDuplicate?: (nodeId: string) => void;
   onDelete?: (nodeId: string) => void;

@@ -1283,6 +1283,11 @@
   color: var(--a3s-form-muted);
 }
 
+/* A reviewer said no at an approval gate: the run stopped there on purpose. */
+.a3s-form-workflow-node-preview-status[data-status="rejected"] {
+  color: var(--a3s-form-amber, #b45309);
+}
+
 .a3s-form-workflow-node-preview-body {
   position: relative;
   z-index: 2;
