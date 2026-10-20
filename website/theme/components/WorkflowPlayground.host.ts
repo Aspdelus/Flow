@@ -496,6 +496,7 @@ export type HostScopeProgress = {
   total?: number;
   failed: number;
   ended: boolean;
+  notPassed: boolean;
 };
 
 /** One iteration's or loop's Flow steps, gathered from a snapshot. */
@@ -508,6 +509,7 @@ type HostScopeRun = {
   total?: number;
   rounds: HostNodeRuntimeStatus[];
   result?: HostNodeRuntimeStatus;
+  ended?: string;
   roundCount?: number;
 };
 
@@ -520,7 +522,9 @@ export function hostNodeDetailText(
   if (progress.kind === 'loop') {
     const n = progress.count;
     if (!progress.ended) return zh ? `第 ${n} 轮` : `round ${n}`;
-    return zh ? `${n} 轮` : n === 1 ? '1 round' : `${n} rounds`;
+    const rounds = zh ? `${n} 轮` : n === 1 ? '1 round' : `${n} rounds`;
+    if (!progress.notPassed) return rounds;
+    return zh ? `${rounds}，未通过` : `${rounds}, not passed`;
   }
   const items = progress.ended
     ? zh
@@ -689,8 +693,11 @@ export function hostRunExecutionFromSnapshot(
       if (loop[2]) scope.rounds.push(nodeStatus);
       else {
         scope.result = nodeStatus;
-        if (isRecord(step.output) && typeof step.output.rounds === 'number')
-          scope.roundCount = step.output.rounds;
+        if (isRecord(step.output)) {
+          scope.ended = String(step.output.status ?? '');
+          if (typeof step.output.rounds === 'number')
+            scope.roundCount = step.output.rounds;
+        }
       }
     }
   }
@@ -709,14 +716,15 @@ export function hostRunExecutionFromSnapshot(
   }
   const nodeDetails: Record<string, HostScopeProgress> = {};
   for (const [stepId, scope] of scopes) {
-    // Shown once the host recorded one of its own steps.
-    if (!scope.items && !scope.result && scope.rounds.length === 0) continue;
     const instances = [...scope.instances.values()];
     const failed = instances.filter((item) => item.includes('error')).length;
+    // A loop records its end as completed in Flow even when a round failed
+    // or it ran out of rounds; its output says which (control_flow.rs loop_result).
     const nodeStatus: HostNodeRuntimeStatus =
       scope.result === 'error' ||
       scope.items === 'error' ||
-      scope.rounds.includes('error')
+      scope.rounds.includes('error') ||
+      scope.ended === 'failed'
         ? 'error'
         : scope.result === 'success'
           ? 'success'
@@ -732,6 +740,7 @@ export function hostRunExecutionFromSnapshot(
         kind: 'loop',
         count: scope.roundCount ?? started,
         ended: scope.result === 'success',
+        notPassed: scope.ended === 'not_passed',
         failed: 0,
       };
     } else {
@@ -747,6 +756,7 @@ export function hostRunExecutionFromSnapshot(
           ).length,
           total: scope.total,
           ended: scope.result === 'success',
+          notPassed: false,
           failed,
         };
     }

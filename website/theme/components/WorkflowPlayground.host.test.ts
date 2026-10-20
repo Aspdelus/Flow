@@ -2222,22 +2222,48 @@ describe('WorkflowPlayground host mode: loops', () => {
     expect(broken.nodeStatuses.refine).toBe('error');
   });
 
-  it('says how many rounds a loop ran', () => {
-    const passed = hostRunExecutionFromSnapshot({
-      status: 'completed',
-      steps: {
-        'loop:refine@0': { status: 'completed' },
-        'loop:refine': {
-          status: 'completed',
-          output: { status: 'passed', rounds: 2 },
+  it('says which round a loop is on, and how it ended', () => {
+    const round = (body: string, index: number, status: string) => ({
+      status,
+      input: {
+        iteration: {
+          id: 'refine',
+          kind: 'loop',
+          index,
+          body: ['draft', 'check'],
         },
       },
     });
+    // Round 1 runs before any round was decided.
+    const first = hostRunExecutionFromSnapshot({
+      status: 'running',
+      steps: { 'agent:draft#0': round('draft', 0, 'running') },
+    });
+    expect([first.nodeStatuses.refine, first.nodeStatuses['refine~round']]).toEqual(
+      ['running', 'running'],
+    );
+    expect(hostNodeDetailText(first.nodeDetails.refine, 'zh')).toBe('第 1 轮');
+    const ended = (status: string, rounds: number) =>
+      hostRunExecutionFromSnapshot({
+        status: 'completed',
+        steps: {
+          'loop:refine@0': { status: 'completed' },
+          'loop:refine': { status: 'completed', output: { status, rounds } },
+        },
+      });
+    const passed = ended('passed', 2);
     expect(passed.nodeStatuses.refine).toBe('success');
     expect(hostNodeDetailText(passed.nodeDetails.refine, 'zh')).toBe('2 轮');
-    expect(hostNodeDetailText(passed.nodeDetails.refine, 'en')).toBe(
-      '2 rounds',
+    const notPassed = ended('not_passed', 3);
+    expect(notPassed.nodeStatuses.refine).toBe('success');
+    expect(hostNodeDetailText(notPassed.nodeDetails.refine, 'zh')).toBe(
+      '3 轮，未通过',
     );
+    // A failed round ends the loop as completed in Flow; its output says failed.
+    const failed = ended('failed', 1);
+    expect(failed.nodeStatuses.refine).toBe('error');
+    expect(failed.completedStepCount).toBe(0);
+    expect(hostNodeDetailText(failed.nodeDetails.refine, 'en')).toBe('1 round');
   });
 });
 
