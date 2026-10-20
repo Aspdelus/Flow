@@ -624,8 +624,9 @@ export class FlowHostClient {
 
   /**
    * `POST /v1/runs/{run_id}/resume-after-failure` -- submit a human-edited
-   * recovery decision (`agent_id`+`version`, `objective`, and/or `context`;
-   * omitting a field keeps the original value) for the run's currently open
+   * recovery decision (`agent_id`+`version` and/or `objective`; omitting a
+   * field keeps the original value; the host refuses `context`, which must
+   * stay the run's own) for the run's currently open
    * recovery hook. On rejection (400 `REJECTED: <codes>: ...`) the hook
    * stays open/resumable, so this never throws on that response -- the
    * caller inspects `status`/`json.error` and may resubmit.

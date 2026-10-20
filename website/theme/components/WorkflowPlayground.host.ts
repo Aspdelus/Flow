@@ -351,7 +351,6 @@ export async function submitRecoveryEdit(
     agentId?: string;
     version?: string;
     objective?: string;
-    context?: JsonObject;
   },
 ): Promise<void> {
   const client = createHostClient(config);
@@ -361,7 +360,6 @@ export async function submitRecoveryEdit(
     body.version = edit.version;
   }
   if (edit.objective !== undefined) body.objective = edit.objective;
-  if (edit.context !== undefined) body.context = edit.context;
   const { status, json } = await client.postResumeAfterFailure(
     config.runId,
     body,

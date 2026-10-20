@@ -8,7 +8,6 @@ export type WorkflowPlaygroundRecoveryEdit = {
   agentId?: string;
   version?: string;
   objective?: string;
-  context?: JsonObject;
 };
 
 export type WorkflowPlaygroundRecoveryDialogProps = {
@@ -32,7 +31,7 @@ function agentRefKey(agentId: unknown, version: unknown): string {
  * suspends the run behind a `recovery:<step_id>.<attempt>` hook instead of
  * failing outright (see `adapters/flow-host`'s `resume_after_failure`).
  * This dialog shows the failure reason and the other steps' outputs already
- * produced, lets a human edit the failed step's agent/objective/context, and
+ * produced, lets a human edit the failed step's agent/objective, and
  * submits the decision -- never an automatic retry, always an explicit
  * human choice informed by the failure.
  *
@@ -68,8 +67,6 @@ export function WorkflowPlaygroundRecoveryDialog({
   const [objective, setObjective] = useState(
     typeof originalStep.objective === 'string' ? originalStep.objective : '',
   );
-  const [contextText, setContextText] = useState('');
-  const [contextError, setContextError] = useState<string | null>(null);
 
   useEffect(() => {
     previousFocus.current =
@@ -122,29 +119,6 @@ export function WorkflowPlaygroundRecoveryDialog({
   const submit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (busy) return;
-    let context: JsonObject | undefined;
-    const trimmedContext = contextText.trim();
-    if (trimmedContext) {
-      try {
-        const parsed = JSON.parse(trimmedContext) as unknown;
-        if (
-          typeof parsed !== 'object' ||
-          parsed === null ||
-          Array.isArray(parsed)
-        ) {
-          throw new Error('not an object');
-        }
-        context = parsed as JsonObject;
-        setContextError(null);
-      } catch {
-        setContextError(
-          locale === 'zh'
-            ? '上下文必须是合法的 JSON 对象'
-            : 'Context must be valid JSON object',
-        );
-        return;
-      }
-    }
     const edit: WorkflowPlaygroundRecoveryEdit = {};
     if (agentKey !== KEEP_CURRENT_AGENT && agentKey !== originalAgentKey) {
       const [agentId, version] = agentKey.split('@');
@@ -155,7 +129,6 @@ export function WorkflowPlaygroundRecoveryDialog({
     if (trimmedObjective && trimmedObjective !== originalStep.objective) {
       edit.objective = trimmedObjective;
     }
-    if (context !== undefined) edit.context = context;
     onSubmit(edit);
   };
 
@@ -172,9 +145,6 @@ export function WorkflowPlaygroundRecoveryDialog({
   const agentLabel = locale === 'zh' ? 'Agent' : 'Agent';
   const keepCurrentLabel = locale === 'zh' ? '保持不变' : 'Keep current agent';
   const objectiveLabel = locale === 'zh' ? '目标描述' : 'Objective';
-  const contextLabel =
-    locale === 'zh' ? '上下文（JSON，可选）' : 'Context (JSON, optional)';
-  const contextPlaceholder = locale === 'zh' ? '{}' : '{}';
   const cancelLabel = locale === 'zh' ? '取消' : 'Cancel';
   const submitLabel = locale === 'zh' ? '提交并恢复' : 'Submit and resume';
   const submittingLabel = locale === 'zh' ? '提交中…' : 'Submitting…';
@@ -260,24 +230,6 @@ export function WorkflowPlaygroundRecoveryDialog({
               value={objective}
             />
           </label>
-          <label className="a3s-recovery-dialog__field">
-            <span>{contextLabel}</span>
-            <textarea
-              disabled={busy}
-              onChange={(event) => {
-                setContextText(event.currentTarget.value);
-                setContextError(null);
-              }}
-              placeholder={contextPlaceholder}
-              rows={3}
-              value={contextText}
-            />
-          </label>
-          {contextError && (
-            <p className="a3s-recovery-dialog__error" role="alert">
-              {contextError}
-            </p>
-          )}
           {error && (
             <p className="a3s-recovery-dialog__error" role="alert">
               {error}
