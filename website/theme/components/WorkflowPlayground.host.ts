@@ -1662,6 +1662,19 @@ export function hostSavePlan(
   };
 }
 
+/** The agents a failed step may be swapped to: those of the plan it belongs
+ * to -- its sub-plan's for a sub-plan step, which the host checks the edit
+ * against (adapters/flow-host `resume_after_failure`). */
+export function hostRecoveryAgentRefs(
+  canvas: HostCanvasDocument | null,
+  subplan: string | undefined,
+): JsonObject[] {
+  const plan = subplan
+    ? canvas && subplanCanvasDocument(canvas, subplan)?.plan
+    : canvas?.plan;
+  return Array.isArray(plan?.agent_refs) ? (plan.agent_refs as JsonObject[]) : [];
+}
+
 /** How many steps the run has: the parent plan's and every planned sub-plan's. */
 export function hostPlanStepCount(
   canvas: HostCanvasDocument | null,

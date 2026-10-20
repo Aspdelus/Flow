@@ -42,6 +42,7 @@ import {
   hostRewireOtherwise,
   hostRunExecutionFromSnapshot,
   hostNodeDetailText,
+  hostRecoveryAgentRefs,
   hostStepOutputOptions,
   hostUnsavedNodes,
   hostWithApprovalInputs,
@@ -3213,6 +3214,30 @@ describe('WorkflowPlayground host mode: sub-plans (W26)', () => {
       stopped.nodeStatuses['eu/stop'],
     ]).toEqual(['error', 'error']);
     expect(hostPlanStepCount(canvas())).toBe(3 + 4);
+  });
+
+  it("offers a failed sub-plan step that sub-plan's agents to swap to", () => {
+    const ref = (agent_id: string) => ({ agent_id, version: '1.0.0' });
+    const document = canvasDocumentFromProposalDto({
+      run_id: 'run-sub',
+      proposal_digest: 'sha256:p',
+      proposal: { plan: { steps: [], agent_refs: [ref('planner')] } },
+      subplans: [
+        {
+          step_id: 'eu',
+          proposal_digest: 'sha256:eu',
+          proposal: {
+            plan: { steps: [], agent_refs: [ref('auditor'), ref('fixer')] },
+          },
+        },
+      ],
+    });
+    const ids = (subplan?: string) =>
+      hostRecoveryAgentRefs(document, subplan).map((item) => item.agent_id);
+    expect(ids()).toEqual(['planner']);
+    expect(ids('eu')).toEqual(['auditor', 'fixer']);
+    // A sub-plan the canvas has no plan for offers nothing, not the parent's.
+    expect(ids('us')).toEqual([]);
   });
 
   it('saves the parent and each sub-plan unchanged when nothing was edited', () => {

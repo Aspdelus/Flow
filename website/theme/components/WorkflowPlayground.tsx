@@ -105,6 +105,7 @@ import {
   hostWithConditionInput,
   hostPlanSignature,
   hostPlanStepCount,
+  hostRecoveryAgentRefs,
   hostScopeGraph,
   hostSavePlan,
   hostSubplanOfNode,
@@ -2818,11 +2819,10 @@ function WorkflowPlaygroundSurface({
 
       {recoveryDialogOpen && hostRecoveryFailure && (
         <WorkflowPlaygroundRecoveryDialog
-          agentRefs={
-            Array.isArray(hostCanvas?.plan?.agent_refs)
-              ? (hostCanvas.plan.agent_refs as JsonObject[])
-              : []
-          }
+          agentRefs={hostRecoveryAgentRefs(
+            hostCanvas,
+            hostRecoveryFailure.metadata.subplan,
+          )}
           busy={recoveryBusy}
           error={recoveryError}
           failure={hostRecoveryFailure}

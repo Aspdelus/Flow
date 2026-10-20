@@ -179,6 +179,9 @@ export type HostRecoveryFailure = {
     original_step: JsonObject;
     proposal_digest: unknown;
     completed_step_outputs: unknown[];
+    /** The sub-plan the failed step belongs to; it is recovered with that
+     * sub-plan's agents (adapters/flow-host `resume_after_failure`). */
+    subplan?: string;
   };
 };
 
@@ -219,6 +222,9 @@ export function recoveryFailureFromDto(
       completed_step_outputs: Array.isArray(metadata.completed_step_outputs)
         ? metadata.completed_step_outputs
         : [],
+      ...(typeof metadata.subplan === 'string'
+        ? { subplan: metadata.subplan }
+        : {}),
     },
   };
 }

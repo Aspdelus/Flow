@@ -388,6 +388,16 @@ describe('host canvas inject helpers', () => {
     });
   });
 
+  it('recoveryFailureFromDto keeps the sub-plan a failed step belongs to', () => {
+    const failure = recoveryFailureFromDto({
+      run_id: 'run-1',
+      hook_id: 'recovery:eu/audit.0',
+      token: 'tok',
+      metadata: { step_id: 'eu/audit', subplan: 'eu', original_step: {} },
+    });
+    expect(failure?.metadata.subplan).toBe('eu');
+  });
+
   it('recoveryFailureFromDto passes through null (no open recovery hook)', () => {
     expect(recoveryFailureFromDto(null)).toBeNull();
   });
