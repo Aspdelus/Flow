@@ -3159,6 +3159,24 @@ describe('WorkflowPlayground host mode: sub-plans (W26)', () => {
     ]).toEqual(['running', 'success', 'success', 'running', 'rejected']);
     for (const id of ['eu/audit', 'eu/route', 'eu/fixes'])
       expect(nodeOf(graph, id)).toBeDefined();
+    // A sub-plan waiting on its own gate, or failed in one of its steps.
+    const parked = (steps: Record<string, unknown>, hooks = {}) =>
+      hostRunExecutionFromSnapshot({ status: 'suspended', steps, hooks })
+        .nodeStatuses.eu;
+    expect(
+      parked(
+        { 'agent:eu/audit': { status: 'completed' } },
+        { 'gate:eu/route': { status: 'active' } },
+      ),
+    ).toBe('waiting');
+    expect(parked({ 'agent:eu/audit': { status: 'failed' } })).toBe('error');
+    // Once it ended, its own end wins: one item of an iteration in it failed.
+    expect(
+      parked({
+        'agent:eu/quote@0': { status: 'failed' },
+        'subplan:eu': { status: 'completed', output: { status: 'completed' } },
+      }),
+    ).toBe('success');
     expect(hostPlanStepCount(canvas())).toBe(3 + 4);
   });
 

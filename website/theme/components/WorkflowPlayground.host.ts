@@ -790,18 +790,6 @@ export function hostRunExecutionFromSnapshot(
       );
     }
   }
-  for (const stepId of Object.keys(nodeStatuses)) {
-    const owner = stepId.includes('/')
-      ? stepId.slice(0, stepId.indexOf('/'))
-      : '';
-    if (
-      owner &&
-      !(owner in nodeStatuses) &&
-      nodeStatuses[stepId] === 'running'
-    ) {
-      nodeStatuses[owner] = 'running';
-    }
-  }
   let openGateStepId: string | null = null;
   const hooks = isRecord(record.hooks) ? record.hooks : {};
   for (const [hookId, hook] of Object.entries(hooks)) {
@@ -838,6 +826,22 @@ export function hostRunExecutionFromSnapshot(
   for (const stepId of skippedStepIds)
     for (const nodeId of hostConditionNodeIds(stepId, CONDITION_CASE_LIMIT))
       nodeStatuses[nodeId] ??= 'skipped';
+  // A sub-plan's steps run under its prefix: while it has not ended, its
+  // container shows what they do, a person they wait on first.
+  const children = new Map<string, HostNodeRuntimeStatus[]>();
+  for (const [stepId, nodeStatus] of Object.entries(nodeStatuses)) {
+    const slash = stepId.indexOf('/');
+    if (slash <= 0) continue;
+    const owner = stepId.slice(0, slash);
+    children.set(owner, [...(children.get(owner) ?? []), nodeStatus]);
+  }
+  for (const [owner, statuses] of children) {
+    if (owner in nodeStatuses) continue;
+    const shown = (['running', 'waiting', 'error'] as const).find((value) =>
+      statuses.includes(value),
+    );
+    if (shown) nodeStatuses[owner] = shown;
+  }
   if (latest.size > 0) nodeStatuses.start = 'success';
   const outcome = typeof output.status === 'string' ? output.status : '';
   if (outcome === 'rejected_at_gate') nodeStatuses.done = 'rejected';
