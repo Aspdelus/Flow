@@ -18,10 +18,19 @@ const STATUS_LABEL: Readonly<Record<string, { zh: string; en: string }>> = {
   completed: { zh: '已完成', en: 'Completed' },
   failed: { zh: '失败', en: 'Failed' },
   cancelled: { zh: '已取消', en: 'Cancelled' },
-  // Not a Flow status: the run output's, for a run a reviewer rejected at a gate.
+  // Not Flow statuses: the run output's, for a run a reviewer rejected at a
+  // gate, and for one whose task the planner refused (nothing ran).
   rejected_at_gate: { zh: '已驳回', en: 'Rejected' },
+  refused: { zh: '未能规划', en: 'Not planned' },
   continued_as_new: { zh: '已续期', en: 'Continued' },
 };
+
+/** What to call a run: how it ended when Flow's "completed" hides that. */
+export function runStatusShown(status: string, outcome?: string): string {
+  return outcome === 'rejected_at_gate' || outcome === 'refused'
+    ? outcome
+    : status;
+}
 
 export function statusLabel(status: string, locale: FlowWebsiteLocale): string {
   const entry = STATUS_LABEL[status.toLowerCase()];
@@ -153,7 +162,7 @@ export function WorkflowPlaygroundRunList({
                 <span>
                   <strong>{run.runId}</strong>
                   <span className="a3s-run-list__status">
-                    {statusLabel(run.outcome === 'rejected_at_gate' ? run.outcome : run.status, locale)}
+                    {statusLabel(runStatusShown(run.status, run.outcome), locale)}
                   </span>
                   {run.taskText && (
                     <span className="a3s-run-list__task">{run.taskText}</span>

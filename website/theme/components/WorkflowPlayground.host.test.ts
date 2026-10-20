@@ -66,6 +66,7 @@ import {
   withHostModeParams,
 } from './WorkflowPlayground.host';
 import { createPlaygroundNodeCatalog } from './WorkflowPlayground.custom-nodes';
+import { runStatusShown, statusLabel } from './WorkflowPlaygroundRunList';
 import {
   createPlaygroundEdge,
   createPlaygroundNode,
@@ -1856,6 +1857,22 @@ describe('WorkflowPlayground host mode: control-flow plan steps', () => {
     expect(done.nodeStatuses.signoff).toBe('success');
     expect(done.openGateStepId).toBeNull();
     expect(done.skippedStepIds).toEqual(['backorder']);
+  });
+
+  it('leaves a run whose task the planner refused unfinished', () => {
+    // The planner refused the task: Flow completes the run, but nothing ran.
+    const refused = hostRunExecutionFromSnapshot({
+      status: 'completed',
+      steps: { 'orchestrator.plan': { status: 'completed' } },
+      output: { status: 'refused', subplan: 'us' },
+    });
+    expect(refused.outcome).toBe('refused');
+    expect(refused.nodeStatuses.done).toBeUndefined();
+    expect(runStatusShown('completed', 'refused')).toBe('refused');
+    expect(statusLabel(runStatusShown('completed', 'refused'), 'zh')).toBe(
+      '未能规划',
+    );
+    expect(runStatusShown('completed', 'completed')).toBe('completed');
   });
 });
 

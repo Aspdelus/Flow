@@ -75,7 +75,10 @@ import {
   type InspectorTab,
 } from './WorkflowPlaygroundInspector';
 import { WorkflowPlaygroundLibrary } from './WorkflowPlaygroundLibrary';
-import { WorkflowPlaygroundRunList } from './WorkflowPlaygroundRunList';
+import {
+  runStatusShown,
+  WorkflowPlaygroundRunList,
+} from './WorkflowPlaygroundRunList';
 import {
   addConnectedNodeIntoGraph,
   addIntoGraph,
@@ -2313,10 +2316,8 @@ function WorkflowPlaygroundSurface({
             : undefined
         }
         hostFlowStatus={
-          hostExecution?.outcome === 'rejected_at_gate'
-            ? hostExecution.outcome
-            : hostExecution?.status
-            ? hostExecution.status
+          hostExecution?.status
+            ? runStatusShown(hostExecution.status, hostExecution.outcome)
             : typeof hostCanvas?.flow_status === 'string'
               ? hostCanvas.flow_status
               : undefined

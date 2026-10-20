@@ -837,6 +837,8 @@ export function hostRunExecutionFromSnapshot(
   if (latest.size > 0) nodeStatuses.start = 'success';
   const outcome = typeof output.status === 'string' ? output.status : '';
   if (outcome === 'rejected_at_gate') nodeStatuses.done = 'rejected';
+  // The planner refused the task (lib.rs `status: "refused"`): nothing ran.
+  else if (outcome === 'refused') delete nodeStatuses.done;
   else if (status === 'completed') nodeStatuses.done = 'success';
   else if (status === 'failed') nodeStatuses.done = 'error';
   else if (status === 'cancelled') {
