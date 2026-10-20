@@ -771,12 +771,13 @@ export function hostRunExecutionFromSnapshot(
       isRecord(step.output) && typeof step.output.status === 'string'
         ? step.output.status
         : '';
+    // A sub-plan a reviewer rejected ends `rejected` (subplan.rs SUBPLAN_REJECTED).
     const nodeStatus =
-      step.status.toLowerCase() === 'completed' &&
-      ended &&
-      ended !== 'completed'
-        ? 'error'
-        : nodeStatusFromFlowStepStatus(step.status);
+      step.status.toLowerCase() !== 'completed' || !ended || ended === 'completed'
+        ? nodeStatusFromFlowStepStatus(step.status)
+        : ended === 'rejected'
+          ? 'rejected'
+          : 'error';
     nodeStatuses[match[1]] = nodeStatus;
     if (nodeStatus === 'success') completedStepCount += 1;
     if (nodeStatus === 'error') failedStepCount += 1;

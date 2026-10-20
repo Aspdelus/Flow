@@ -3127,7 +3127,7 @@ describe('WorkflowPlayground host mode: sub-plans (W26)', () => {
       statuses['eu/route'],
       statuses['eu/fixes'],
       statuses.us,
-    ]).toEqual(['running', 'success', 'success', 'running', 'error']);
+    ]).toEqual(['running', 'success', 'success', 'running', 'rejected']);
     for (const id of ['eu/audit', 'eu/route', 'eu/fixes'])
       expect(nodeOf(graph, id)).toBeDefined();
     expect(hostPlanStepCount(canvas())).toBe(3 + 4);
