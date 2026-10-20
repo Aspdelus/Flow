@@ -1857,6 +1857,18 @@ describe('WorkflowPlayground host mode: control-flow plan steps', () => {
     expect(done.nodeStatuses.signoff).toBe('success');
     expect(done.openGateStepId).toBeNull();
     expect(done.skippedStepIds).toEqual(['backorder']);
+    // The branch not taken reads as skipped, a skipped condition on every case node.
+    expect(done.nodeStatuses.backorder).toBe('skipped');
+    const routed = hostRunExecutionFromSnapshot({
+      status: 'completed',
+      steps: { 'agent:tax': { status: 'completed' } },
+      output: { skipped_steps: ['route', 'tax'] },
+    });
+    expect([
+      routed.nodeStatuses.route,
+      routed.nodeStatuses['route~1'],
+      routed.nodeStatuses.tax,
+    ]).toEqual(['skipped', 'skipped', 'success']);
   });
 
   it('leaves a run whose task the planner refused unfinished', () => {

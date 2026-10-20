@@ -834,6 +834,10 @@ export function hostRunExecutionFromSnapshot(
       : []),
     ...subplanSkipped,
   ];
+  // Steps the run routed around; a condition's are all its case nodes.
+  for (const stepId of skippedStepIds)
+    for (const nodeId of hostConditionNodeIds(stepId, CONDITION_CASE_LIMIT))
+      nodeStatuses[nodeId] ??= 'skipped';
   if (latest.size > 0) nodeStatuses.start = 'success';
   const outcome = typeof output.status === 'string' ? output.status : '';
   if (outcome === 'rejected_at_gate') nodeStatuses.done = 'rejected';

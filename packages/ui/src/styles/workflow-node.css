@@ -1288,6 +1288,11 @@
   color: var(--a3s-form-amber, #b45309);
 }
 
+/* A step the run routed around: a branch not taken. */
+.a3s-form-workflow-node-preview-status[data-status="skipped"] {
+  color: var(--a3s-form-muted);
+}
+
 /* A step past its own deadline: its timeout fallback ran instead. */
 .a3s-form-workflow-node-preview-status[data-status="timedOut"] {
   color: var(--a3s-form-amber, #b45309);
