@@ -1958,7 +1958,7 @@ describe('WorkflowPlayground host mode: step timeouts', () => {
     expect(saved.plan.edges).toEqual(plan.edges);
   });
 
-  it('shows a step that timed out as failed even though Flow completed it', () => {
+  it('shows a step that timed out as timed out, not failed: its fallback ran', () => {
     const execution = hostRunExecutionFromSnapshot({
       status: 'completed',
       steps: {
@@ -1970,9 +1970,12 @@ describe('WorkflowPlayground host mode: step timeouts', () => {
       },
     });
     expect(execution.nodeStatuses).toMatchObject({
-      inventory: 'error',
+      inventory: 'timedOut',
       estimate: 'success',
     });
+    expect([execution.completedStepCount, execution.failedStepCount]).toEqual([
+      2, 0,
+    ]);
   });
 });
 

@@ -529,6 +529,8 @@ function nodeStatusFromFlowStepStatus(status: string): HostNodeRuntimeStatus {
       return 'error';
     case 'cancelled':
       return 'cancelled';
+    case 'timed_out':
+      return 'timedOut';
     case 'pending':
       return 'waiting';
     default:
@@ -560,7 +562,7 @@ export function hostRunExecutionFromSnapshot(
         isRecord(step.output) && step.output.status === 'timed_out';
       latest.set(stepId, {
         attempt,
-        status: timedOut ? 'failed' : step.status,
+        status: timedOut ? 'timed_out' : step.status,
       });
     }
   }
@@ -572,7 +574,8 @@ export function hostRunExecutionFromSnapshot(
     const nodeStatus = nodeStatusFromFlowStepStatus(stepStatus);
     nodeStatuses[stepId] = nodeStatus;
     if (nodeStatus === 'running') runningStepIds.push(stepId);
-    if (nodeStatus === 'success') completedStepCount += 1;
+    if (nodeStatus === 'success' || nodeStatus === 'timedOut')
+      completedStepCount += 1;
     if (nodeStatus === 'error') failedStepCount += 1;
   }
   for (const [flowStepId, step] of Object.entries(steps)) {

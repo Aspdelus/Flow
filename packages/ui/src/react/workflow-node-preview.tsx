@@ -9,7 +9,7 @@ import {
 } from "./workflow-node-visual";
 
 export type WorkflowNodePreviewStatus =
-  "idle" | "running" | "success" | "waiting" | "error" | "cancelled" | "rejected";
+  "idle" | "running" | "success" | "waiting" | "error" | "cancelled" | "rejected" | "timedOut";
 
 export interface WorkflowNodePreviewProps {
   node: WorkflowNodeDefinition;
@@ -119,6 +119,7 @@ function previewCopy(chinese: boolean) {
           error: "运行失败",
           cancelled: "已取消",
           rejected: "已驳回",
+          timedOut: "已超时",
         },
       }
     : {
@@ -140,6 +141,7 @@ function previewCopy(chinese: boolean) {
           error: "Failed",
           cancelled: "Cancelled",
           rejected: "Rejected",
+          timedOut: "Timed out",
         },
       };
 }

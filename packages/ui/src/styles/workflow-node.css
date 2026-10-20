@@ -1288,6 +1288,11 @@
   color: var(--a3s-form-amber, #b45309);
 }
 
+/* A step past its own deadline: its timeout fallback ran instead. */
+.a3s-form-workflow-node-preview-status[data-status="timedOut"] {
+  color: var(--a3s-form-amber, #b45309);
+}
+
 .a3s-form-workflow-node-preview-body {
   position: relative;
   z-index: 2;
