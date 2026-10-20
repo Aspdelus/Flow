@@ -1140,6 +1140,14 @@
   font: 11px/1.4 var(--workflow-sans);
 }
 
+/* Under a failure reason: what a retry of a timed-out step will meet. */
+.a3s-recovery-dialog__hint {
+  display: block;
+  margin-top: 6px;
+  color: var(--a3s-form-amber, #b45309);
+  font-family: inherit;
+}
+
 .a3s-recovery-dialog__error {
   margin: 0;
   padding: 8px 10px;

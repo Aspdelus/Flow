@@ -139,6 +139,13 @@ export function WorkflowPlaygroundRecoveryDialog({
       : 'This step failed and the run is suspended for a human decision. Review the failure reason and other steps’ outputs, edit as needed, and submit to continue — never an automatic retry.';
   const stepLabel = locale === 'zh' ? '失败步骤' : 'Failed step';
   const errorLabel = locale === 'zh' ? '失败原因' : 'Failure reason';
+  // The host stores the Flow failure as its error's Display (`runtime error: <CODE>: ...`).
+  const failureText = String(failure.metadata.error ?? '').replace(/^runtime error: /, '');
+  const timeoutHint = failureText.startsWith('TIMEOUT:')
+    ? locale === 'zh'
+      ? '这一步的期限到了。恢复只能换 agent 或改目标，期限不变：原样重试会再次超时，可以把目标描述改小，让它在期限内做完。'
+      : 'This step ran out of time. Recovery changes the agent or the objective, not the deadline: the same work will time out again, so narrow the objective to fit.'
+    : null;
   const outputsLabel =
     locale === 'zh' ? '已产出的其它步骤输出' : 'Other completed step outputs';
   const noOutputsLabel = locale === 'zh' ? '（暂无）' : '(none yet)';
@@ -192,7 +199,15 @@ export function WorkflowPlaygroundRecoveryDialog({
           <dd>{String(failure.metadata.step_id ?? '')}</dd>
           <dt>{errorLabel}</dt>
           <dd data-testid="recovery-dialog-error-reason">
-            {String(failure.metadata.error ?? '')}
+            {failureText}
+            {timeoutHint && (
+              <span
+                className="a3s-recovery-dialog__hint"
+                data-testid="recovery-dialog-timeout-hint"
+              >
+                {timeoutHint}
+              </span>
+            )}
           </dd>
           <dt>{outputsLabel}</dt>
           <dd>
