@@ -567,6 +567,9 @@ const LOOP_FLOW_STEP_ID = /^loop:(.+?)(@\d+)?$/;
 // A sub-plan's steps run in the parent run under its prefix (`agent:<id>/<step>`)
 // and `subplan:<id>` records how it ended (adapters/flow-host/src/subplan.rs).
 const SUBPLAN_FLOW_STEP_ID = /^subplan:(.+)$/;
+// A plan's fail step records `FAILED_BY_PLAN <step_id>: <reason>`
+// (adapters/flow-host control_flow.rs PLAN_FAILURE_PREFIX).
+const PLAN_FAILURE = /^FAILED_BY_PLAN (\S+):/;
 // Upper bound of a condition's cases (orchestrator-core CONDITION_CASE_LIMIT):
 // every case node of the chain (hostConditionNodeIds) shares one status.
 const CONDITION_CASE_LIMIT = 8;
@@ -764,6 +767,7 @@ export function hostRunExecutionFromSnapshot(
   }
   // A sub-plan node runs while any of its steps do and ends with `subplan:<id>`.
   const subplanSkipped: string[] = [];
+  const subplanFailures: string[] = [];
   for (const [flowStepId, step] of Object.entries(steps)) {
     const match = SUBPLAN_FLOW_STEP_ID.exec(flowStepId);
     if (!match || !isRecord(step) || typeof step.status !== 'string') continue;
@@ -781,6 +785,12 @@ export function hostRunExecutionFromSnapshot(
     nodeStatuses[match[1]] = nodeStatus;
     if (nodeStatus === 'success') completedStepCount += 1;
     if (nodeStatus === 'error') failedStepCount += 1;
+    // A fail step it reached; the parent run goes on (lib.rs fail_message).
+    const stopped =
+      isRecord(step.output) && typeof step.output.reason === 'string'
+        ? PLAN_FAILURE.exec(step.output.reason)
+        : null;
+    if (stopped) subplanFailures.push(stopped[1]);
     // Its own skipped steps, already under its prefix.
     if (isRecord(step.output) && Array.isArray(step.output.skipped_steps)) {
       subplanSkipped.push(
@@ -806,13 +816,14 @@ export function hostRunExecutionFromSnapshot(
       if (!rejected) completedStepCount += 1;
     }
   }
-  // A plan's fail step records `FAILED_BY_PLAN <step_id>: <reason>`
-  // (adapters/flow-host control_flow.rs PLAN_FAILURE_PREFIX).
+  // The fail step that ended the run, and those that ended a sub-plan.
   const planFailure =
-    typeof record.error === 'string'
-      ? /^FAILED_BY_PLAN (\S+):/.exec(record.error)
-      : null;
-  if (planFailure) nodeStatuses[planFailure[1]] = 'error';
+    typeof record.error === 'string' ? PLAN_FAILURE.exec(record.error) : null;
+  for (const stepId of [
+    ...(planFailure ? [planFailure[1]] : []),
+    ...subplanFailures,
+  ])
+    nodeStatuses[stepId] = 'error';
   const output = isRecord(record.output) ? record.output : {};
   const skippedStepIds = [
     ...(Array.isArray(output.skipped_steps)

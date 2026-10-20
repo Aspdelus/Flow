@@ -3177,6 +3177,23 @@ describe('WorkflowPlayground host mode: sub-plans (W26)', () => {
         'subplan:eu': { status: 'completed', output: { status: 'completed' } },
       }),
     ).toBe('success');
+    // A fail step the sub-plan reached; the run goes on (lib.rs fail_message).
+    const stopped = hostRunExecutionFromSnapshot({
+      status: 'completed',
+      steps: {
+        'subplan:eu': {
+          status: 'completed',
+          output: {
+            status: 'failed',
+            reason: 'FAILED_BY_PLAN eu/stop: blocked by the audit',
+          },
+        },
+      },
+    });
+    expect([
+      stopped.nodeStatuses.eu,
+      stopped.nodeStatuses['eu/stop'],
+    ]).toEqual(['error', 'error']);
     expect(hostPlanStepCount(canvas())).toBe(3 + 4);
   });
 
