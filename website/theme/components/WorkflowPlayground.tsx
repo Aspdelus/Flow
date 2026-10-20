@@ -122,6 +122,7 @@ import {
   submitGateDecision,
   loadHostRunExecution,
   hostNodeDetailText,
+  hostPlanScopeRevision,
   loadHostRunTaskText,
   pendingRunStart,
   postCopilotRequest,
@@ -232,6 +233,9 @@ function WorkflowPlaygroundSurface({
     });
   const [hostCanvas, setHostCanvas] = useState<HostCanvasDocument | null>(null);
   const [hostBusy, setHostBusy] = useState(false);
+  // While a re-plan runs: the planning revision on screen, so only a newer
+  // one's draft previews (see mergeHostDraftStep).
+  const [hostReplanFrom, setHostReplanFrom] = useState<number | null>(null);
   // Independent of hostCanvas.flow_status on purpose -- a run can be
   // "suspended" for unrelated reasons (an approval hook, a timer), so
   // whether the recovery dialog applies is only ever known by asking
@@ -486,8 +490,9 @@ function WorkflowPlaygroundSurface({
   // the request via AbortController. Fail-soft throughout -- see
   // subscribeToHostProgress's doc comment; a host without this endpoint (or
   // a flaky one) must never block opening/saving/approving/recovering a run.
+  const hostPreviewing = Boolean(hostMode?.runId) && (!hostCanvas || hostReplanFrom !== null);
   useEffect(() => {
-    if (!hostMode?.runId || hostCanvas) {
+    if (!hostMode?.runId || !hostPreviewing) {
       setHostProgress(null);
       setHostPlanningPhase(null);
       hostDraftRef.current = EMPTY_HOST_DRAFT;
@@ -501,7 +506,11 @@ function WorkflowPlaygroundSurface({
         return;
       }
       if (frame.kind === 'plan_step') {
-        hostDraftRef.current = mergeHostDraftStep(hostDraftRef.current, frame);
+        hostDraftRef.current = mergeHostDraftStep(
+          hostDraftRef.current,
+          frame,
+          hostReplanFrom ?? undefined,
+        );
       }
       setHostProgress(frame);
     };
@@ -522,13 +531,13 @@ function WorkflowPlaygroundSurface({
       }
     })();
     return () => controller.abort();
-  }, [hostMode, hostCanvas]);
+  }, [hostMode, hostPreviewing, hostReplanFrom]);
 
   // Planning preview: reveal the composed steps one at a time, drawn with the
   // proposal's own projection; the proposal replaces the preview the moment
   // it loads (the effect above resets it).
   useEffect(() => {
-    if (!hostMode?.runId || hostCanvas) return;
+    if (!hostMode?.runId || !hostPreviewing) return;
     const HOST_DRAFT_REVEAL_MS = 350;
     const timer = window.setInterval(() => {
       const queue = hostDraftRef.current;
@@ -541,10 +550,10 @@ function WorkflowPlaygroundSurface({
       });
     }, HOST_DRAFT_REVEAL_MS);
     return () => window.clearInterval(timer);
-  }, [hostMode, hostCanvas]);
+  }, [hostMode, hostPreviewing]);
 
   useEffect(() => {
-    if (!hostMode?.runId || hostCanvas || hostDraftShown.count === 0) return;
+    if (!hostMode?.runId || !hostPreviewing || hostDraftShown.count === 0) return;
     const queue = hostDraftRef.current;
     if (queue.key !== hostDraftShown.key) return;
     try {
@@ -561,7 +570,7 @@ function WorkflowPlaygroundSurface({
     } catch {
       // A preview the projection cannot draw is skipped; the proposal follows.
     }
-  }, [catalog, hostCanvas, hostDraftShown, hostMode, locale, restore]);
+  }, [catalog, hostPreviewing, hostDraftShown, hostMode, locale, restore]);
 
   // Load the task text once per run. A run started from this page may not
   // exist on the host for a moment, so retry briefly; fail-soft (the generic
@@ -1682,8 +1691,17 @@ function WorkflowPlaygroundSurface({
     }
     const client = createHostClient(hostMode);
     setHostBusy(true);
-    void client
-      .requestReplan(hint, editRevision)
+    void (async () => {
+      // The re-plan request returns once the new plan is composed, so its
+      // draft previews from now: newer than the planning on screen (a
+      // pending re-plan already names its own step, the one before is shown).
+      const before = await client.getProposal(hostMode.runId).catch(() => null);
+      const named = hostPlanScopeRevision(
+        typeof before?.plan_step_id === 'string' ? before.plan_step_id : '',
+      );
+      setHostReplanFrom(before?.replan_pending === true ? named - 1 : named);
+      return client.requestReplan(hint, editRevision);
+    })()
       .then(async (result) => {
         const decision = (result.json.decision ?? {}) as {
           status?: string;
@@ -1718,6 +1736,7 @@ function WorkflowPlaygroundSurface({
             dto.approval_hook_waiting === true
           ) {
             const refreshed = refreshCanvasFromProposalDto(dto);
+            setHostReplanFrom(null);
             setHostCanvas(refreshed);
             lastSavedPlanStepsRef.current = hostPlanSignature(refreshed);
             restore(graphFromHostCanvas(refreshed, locale, catalog));
@@ -1736,7 +1755,15 @@ function WorkflowPlaygroundSurface({
       .catch((error: unknown) => {
         setAnnouncement(error instanceof Error ? error.message : String(error));
       })
-      .finally(() => setHostBusy(false));
+      .finally(() => {
+        setHostBusy(false);
+        // No new plan (refused, timed out, failed): put back the one a
+        // preview may have drawn over.
+        setHostReplanFrom((from) => {
+          if (from !== null) restore(graphFromHostCanvas(hostCanvas, locale, catalog));
+          return null;
+        });
+      });
   }, [catalog, editRevision, graph, hostCanvas, hostMode, locale, restore]);
 
   const saveToHost = useCallback(() => {

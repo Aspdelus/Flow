@@ -1733,10 +1733,15 @@ export const EMPTY_HOST_DRAFT: HostDraftQueue = { key: '', steps: [] };
 export function mergeHostDraftStep(
   queue: HostDraftQueue,
   frame: HostComposeProgressFrame,
+  after?: number,
 ): HostDraftQueue {
   if (frame.kind !== 'plan_step' || !frame.step) return queue;
   const scope = frame.plan_scope ?? 'orchestrator.plan';
   if (scope.includes('.sub:')) return queue;
+  // While a re-plan runs, the host replays the plan on screen (and older
+  // ones): only a planning newer than revision `after` previews.
+  if (after !== undefined && hostPlanScopeRevision(scope) <= after)
+    return queue;
   const key = `${scope}#${frame.revision ?? 0}`;
   const steps = key === queue.key ? [...queue.steps] : [];
   const id = String(frame.step.step_id ?? '');
@@ -1744,6 +1749,13 @@ export function mergeHostDraftStep(
   if (at >= 0) steps[at] = frame.step;
   else steps.push(frame.step);
   return { key, steps };
+}
+
+/** Which planning of a run a plan step id names: `orchestrator.plan` is 0,
+ * its re-plan `orchestrator.plan.r<n>` is n (adapters/flow-host plan_edit.rs). */
+export function hostPlanScopeRevision(scope: string): number {
+  const match = /\.r(\d+)$/.exec(scope);
+  return match ? Number(match[1]) : 0;
 }
 
 /** A canvas document for the planning preview: the steps composed so far,

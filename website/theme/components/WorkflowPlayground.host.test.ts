@@ -26,6 +26,7 @@ import {
   EMPTY_HOST_DRAFT,
   hostDraftCanvas,
   mergeHostDraftStep,
+  hostPlanScopeRevision,
   hostCanvasFromGraph,
   hostApprovalInputs,
   hostConditionChain,
@@ -3580,6 +3581,20 @@ describe('planning preview', () => {
     expect(next.steps.map((step) => step.step_id)).toEqual(['only']);
     const replan = mergeHostDraftStep(next, frame({ step_id: 'r', agent_id: 'a' }, 1, 'orchestrator.plan.r2'));
     expect(replan.steps.map((step) => step.step_id)).toEqual(['r']);
+  });
+
+  it('during a re-plan previews only a newer planning than the plan on screen', () => {
+    expect([
+      hostPlanScopeRevision('orchestrator.plan'),
+      hostPlanScopeRevision('orchestrator.plan.r1'),
+      hostPlanScopeRevision('orchestrator.plan.r12'),
+    ]).toEqual([0, 1, 12]);
+    // The host replays its whole buffer: the plan on screen and older ones come first.
+    let queue = mergeHostDraftStep(EMPTY_HOST_DRAFT, frame({ step_id: 'old' }), 1);
+    queue = mergeHostDraftStep(queue, frame({ step_id: 'shown' }, 1, 'orchestrator.plan.r1'), 1);
+    expect(queue).toBe(EMPTY_HOST_DRAFT);
+    queue = mergeHostDraftStep(queue, frame({ step_id: 'new' }, 1, 'orchestrator.plan.r2'), 1);
+    expect(queue.steps.map((step) => step.step_id)).toEqual(['new']);
   });
 
   it('ignores sub-plan planning and frames that are not plan steps', () => {
