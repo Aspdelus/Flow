@@ -1871,7 +1871,12 @@ describe('WorkflowPlayground host mode: control-flow plan steps', () => {
     ]).toEqual(['skipped', 'skipped', 'success']);
   });
 
-  it('leaves a run whose task the planner refused unfinished', () => {
+  it('starts a plan that begins with a loop, and leaves a refused run unfinished', () => {
+    const looping = hostRunExecutionFromSnapshot({
+      status: 'running',
+      steps: { 'loop:refine@0': { status: 'completed' } },
+    });
+    expect(looping.nodeStatuses.start).toBe('success');
     // The planner refused the task: Flow completes the run, but nothing ran.
     const refused = hostRunExecutionFromSnapshot({
       status: 'completed',
@@ -3159,6 +3164,7 @@ describe('WorkflowPlayground host mode: sub-plans (W26)', () => {
     ]).toEqual(['running', 'success', 'success', 'running', 'rejected']);
     for (const id of ['eu/audit', 'eu/route', 'eu/fixes'])
       expect(nodeOf(graph, id)).toBeDefined();
+    expect(statuses['eu~task']).toBe('success');
     // A sub-plan waiting on its own gate, or failed in one of its steps.
     const parked = (steps: Record<string, unknown>, hooks = {}) =>
       hostRunExecutionFromSnapshot({ status: 'suspended', steps, hooks })

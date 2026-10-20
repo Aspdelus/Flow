@@ -847,13 +847,14 @@ export function hostRunExecutionFromSnapshot(
     children.set(owner, [...(children.get(owner) ?? []), nodeStatus]);
   }
   for (const [owner, statuses] of children) {
+    nodeStatuses[hostSubplanStartId(owner)] = 'success';
     if (owner in nodeStatuses) continue;
     const shown = (['running', 'waiting', 'error'] as const).find((value) =>
       statuses.includes(value),
     );
     if (shown) nodeStatuses[owner] = shown;
   }
-  if (latest.size > 0) nodeStatuses.start = 'success';
+  if (latest.size > 0 || scopes.size > 0) nodeStatuses.start = 'success';
   const outcome = typeof output.status === 'string' ? output.status : '';
   if (outcome === 'rejected_at_gate') nodeStatuses.done = 'rejected';
   // The planner refused the task (lib.rs `status: "refused"`): nothing ran.
