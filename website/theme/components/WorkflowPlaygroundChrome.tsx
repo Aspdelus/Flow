@@ -3,6 +3,7 @@ import {
   ArrowLeft,
   ArrowUUpLeft,
   ArrowUUpRight,
+  ArrowsInSimple,
   ArrowsOutSimple,
   BezierCurve,
   ChatCircleDots,
@@ -875,6 +876,8 @@ export function WorkflowPlaygroundRail({
 }
 
 type PlaygroundCanvasDockProps = {
+  /** Host mode with business blocks or sub-plans (W30): open or collapse them all. */
+  blocks?: { allOpen: boolean; onAll: (open: boolean) => void };
   copy: WorkflowPlaygroundCopy;
   canUndo: boolean;
   canRedo: boolean;
@@ -885,6 +888,7 @@ type PlaygroundCanvasDockProps = {
 };
 
 export function WorkflowPlaygroundCanvasDock({
+  blocks,
   copy,
   canUndo,
   canRedo,
@@ -915,6 +919,17 @@ export function WorkflowPlaygroundCanvasDock({
           <ArrowUUpRight aria-hidden="true" />
         </button>
         <span aria-hidden="true" />
+        {blocks && (
+          <button
+            aria-label={blocks.allOpen ? copy.collapseAllBlocks : copy.expandAllBlocks}
+            data-testid="host-blocks-toggle-all"
+            onClick={() => blocks.onAll(!blocks.allOpen)}
+            title={blocks.allOpen ? copy.collapseAllBlocks : copy.expandAllBlocks}
+            type="button"
+          >
+            {blocks.allOpen ? <ArrowsInSimple aria-hidden="true" /> : <ArrowsOutSimple aria-hidden="true" />}
+          </button>
+        )}
         <button
           aria-label={copy.history}
           onClick={() => onDebugTab('history')}

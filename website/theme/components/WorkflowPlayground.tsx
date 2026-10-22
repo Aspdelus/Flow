@@ -140,6 +140,12 @@ import {
   hostSubplanStepAdded,
 } from './WorkflowPlayground.host-scopes';
 import {
+  hostBlockStatus,
+  hostBlockView,
+  hostCollapsibleIds,
+  hostContainersOfStep,
+} from './WorkflowPlayground.host-blocks';
+import {
   layoutPlaygroundGraphOffThread,
   schedulePlaygroundLayoutWarmup,
 } from './WorkflowPlayground.layout-client';
@@ -306,6 +312,32 @@ function WorkflowPlaygroundSurface({
     return readHostEditRevision(sessionStorage, hostMode.runId);
   });
   const [hostLoadError, setHostLoadError] = useState<string | null>(null);
+  // Business blocks and sub-plans the operator opened (W30); every other one
+  // is drawn collapsed.  Kept per run for the tab, like the edit revision.
+  const hostOpenedKey = hostMode?.runId ? `a3s-flow-host-opened:${hostMode.runId}` : null;
+  const [hostOpened, setHostOpened] = useState<ReadonlySet<string>>(() => {
+    if (!hostOpenedKey || typeof sessionStorage === 'undefined') return new Set();
+    try {
+      const stored = JSON.parse(sessionStorage.getItem(hostOpenedKey) ?? '[]');
+      return new Set(Array.isArray(stored) ? stored.filter((id): id is string => typeof id === 'string') : []);
+    } catch {
+      return new Set();
+    }
+  });
+  const openHostContainers = useCallback(
+    (ids: readonly string[], open: boolean) =>
+      setHostOpened((current) => {
+        const next = new Set(current);
+        for (const id of ids) {
+          if (open) next.add(id);
+          else next.delete(id);
+        }
+        if (hostOpenedKey && typeof sessionStorage !== 'undefined')
+          sessionStorage.setItem(hostOpenedKey, JSON.stringify([...next]));
+        return next;
+      }),
+    [hostOpenedKey],
+  );
   // Run-history picker (hostMode set, no runId yet): the list of runs on the
   // connected host, and whether it's currently being fetched.
   const [hostRuns, setHostRuns] = useState<HostRunSummary[]>([]);
@@ -342,6 +374,8 @@ function WorkflowPlaygroundSurface({
     undefined,
   );
   const graphRef = useRef(graph);
+  // What the canvas draws (the plan in business blocks, W30); the view is fitted to it.
+  const shownNodesRef = useRef(graph.nodes);
   const extensionContextRef = useRef<
     WorkflowPlaygroundExtensionContext | undefined
   >(undefined);
@@ -356,7 +390,8 @@ function WorkflowPlaygroundSurface({
 
   const fitPlaygroundView = useCallback(
     (options: FitBoundsOptions = {}) => {
-      const bounds = getNodesBounds(graphRef.current.nodes);
+      // Top-level nodes only: React Flow sizes a parent before its newly laid-out children.
+      const bounds = getNodesBounds(shownNodesRef.current.filter((node) => !node.hidden && !node.parentId));
       if (bounds.width <= 0 || bounds.height <= 0) {
         return Promise.resolve(false);
       }
@@ -672,6 +707,12 @@ function WorkflowPlaygroundSurface({
   }, [hostMode, hostRunId, hostCanvasLoaded, hostExecutionWatch]);
 
   const openGateStepId = hostExecution?.openGateStepId ?? null;
+  // A gate waiting for a person is opened up, so the reviewer sees it.
+  useEffect(() => {
+    if (openGateStepId) openHostContainers(hostContainersOfStep(graph, openGateStepId), true);
+    // Only when a new gate opens, not on every edit.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [openGateStepId, openHostContainers]);
   useEffect(() => {
     if (!hostMode || !openGateStepId) {
       setHostOpenGate(null);
@@ -1430,13 +1471,56 @@ function WorkflowPlaygroundSurface({
   // Host-mode nodes show the host run's per-step execution state; a local
   // simulation run (if the operator starts one) still takes precedence.
   const viewExecution = hostExecution;
-  const displayStatuses = useMemo(
+  // Host mode draws the plan in business blocks, collapsed until opened (W30).
+  const hostCollapsible = useMemo(
+    () => (hostMode ? hostCollapsibleIds(graph) : []),
+    [graph, hostMode],
+  );
+  const toggleHostContainer = useCallback(
+    (id: string) => openHostContainers([id], !hostOpened.has(id)),
+    [hostOpened, openHostContainers],
+  );
+  const viewGraph = useMemo(
     () =>
+      hostMode
+        ? hostBlockView(
+            graph,
+            new Set(hostCollapsible.filter((id) => !hostOpened.has(id))),
+            locale,
+            catalog.registry,
+            toggleHostContainer,
+          )
+        : graph,
+    [catalog.registry, graph, hostCollapsible, hostMode, hostOpened, locale, toggleHostContainer],
+  );
+  shownNodesRef.current = viewGraph.nodes;
+  // Opening or collapsing a block re-lays the plan out: keep it all in view.
+  const hostOpenedSignature = [...hostOpened].sort().join('\u0001');
+  useEffect(() => {
+    if (!hostMode || hostCollapsible.length === 0) return;
+    // After React Flow has taken the new sizes in (one frame is not always enough).
+    const timer = window.setTimeout(() => {
+      void fitPlaygroundView({ ...PLAYGROUND_FIT_BOUNDS_OPTIONS, duration: 200 });
+    }, 120);
+    return () => window.clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hostOpenedSignature, hostCollapsible.length]);
+  const displayStatuses = useMemo(() => {
+    const base =
       viewExecution && !running
         ? { ...viewExecution.nodeStatuses, ...statuses }
-        : statuses,
-    [viewExecution, running, statuses],
-  );
+        : statuses;
+    if (viewGraph === graph) return base;
+    // A block shows what its steps are doing.
+    const withBlocks = { ...base };
+    for (const node of viewGraph.nodes) {
+      const steps = node.data.hostBlockSteps;
+      if (!Array.isArray(steps)) continue;
+      const status = hostBlockStatus(steps.map((id) => base[String(id)]));
+      if (status) withBlocks[node.id] = status as (typeof base)[string];
+    }
+    return withBlocks;
+  }, [viewExecution, running, statuses, viewGraph, graph]);
 
   const displayDetails = useMemo(
     () =>
@@ -1459,7 +1543,7 @@ function WorkflowPlaygroundSurface({
     edgePalette,
     edgeRouting,
     endEdit: endDrag,
-    graph,
+    graph: viewGraph,
     locale,
     onDeleteAnnotation: deleteAnnotation,
     onDeleteNode: deleteNode,
@@ -2477,6 +2561,14 @@ function WorkflowPlaygroundSurface({
           running={running}
         />
         <WorkflowPlaygroundCanvasDock
+          blocks={
+            hostCollapsible.length > 0
+              ? {
+                  allOpen: hostCollapsible.every((id) => hostOpened.has(id)),
+                  onAll: (open) => openHostContainers(hostCollapsible, open),
+                }
+              : undefined
+          }
           canRedo={canRedo}
           canUndo={canUndo}
           copy={copy}
@@ -2537,7 +2629,8 @@ function WorkflowPlaygroundSurface({
               nodeTypes={nodeTypes}
               nodes={displayNodes}
               nodesConnectable={!running}
-              nodesDraggable={!running}
+              // A canvas drawn in blocks is laid out from the plan; dragging would not stick.
+              nodesDraggable={!running && viewGraph === graph}
               onlyRenderVisibleElements
               onConnect={onConnect}
               onConnectStart={onConnectStart}
@@ -2578,6 +2671,9 @@ function WorkflowPlaygroundSurface({
                 setEditingEdgeId(undefined);
                 if (node.type === 'annotation') {
                   selectAnnotation(node.id);
+                } else if (typeof node.data.hostBlock === 'string') {
+                  // A business block is a view of its steps: clicking it opens or collapses it.
+                  toggleHostContainer(node.id);
                 } else {
                   setSelectedNodeId(node.id);
                   setSelectedAnnotationId(undefined);

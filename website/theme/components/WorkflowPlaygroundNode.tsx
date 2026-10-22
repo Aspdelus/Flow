@@ -5,7 +5,7 @@ import {
   type A3SFlowDagPortDefinition,
 } from '@a3s-lab/flow-ui';
 import { A3SFlowDagNodePreview } from '@a3s-lab/flow-ui/react';
-import { Copy, Play, Trash } from '@phosphor-icons/react';
+import { CaretDown, CaretRight, Copy, Play, Trash } from '@phosphor-icons/react';
 import { Handle, NodeToolbar, Position, type NodeProps } from '@xyflow/react';
 import { memo } from 'react';
 import { workflowPlaygroundCopy } from './WorkflowPlayground.copy';
@@ -43,7 +43,7 @@ function WorkflowPlaygroundNodeComponent({
 
   return (
     <div
-      className={`a3s-workflow-node-shell flow-playground-node${data.container ? ' is-container' : ''}${data.internal ? ' is-internal' : ''}${selected ? ' is-selected' : ''}`}
+      className={`a3s-workflow-node-shell flow-playground-node${data.container ? ' is-container' : ''}${data.collapsed === true ? ' is-collapsed' : ''}${data.internal ? ' is-internal' : ''}${selected ? ' is-selected' : ''}`}
       data-flow-node-type={manifest.type}
     >
       <NodeToolbar
@@ -115,7 +115,23 @@ function WorkflowPlaygroundNodeComponent({
         statusDetail={data.runtimeDetail}
       />
 
-      {data.container && (
+      {data.collapsible === true && typeof data.onToggleCollapse === 'function' && (
+        <button
+          aria-expanded={data.collapsed !== true}
+          aria-label={data.collapsed === true ? text.expandBlock : text.collapseBlock}
+          className="flow-playground-node__collapse nodrag"
+          data-testid={`host-collapse-${data.dagNode.id}`}
+          onClick={(event) => {
+            event.stopPropagation();
+            (data.onToggleCollapse as (id: string) => void)(data.dagNode.id);
+          }}
+          type="button"
+        >
+          {data.collapsed === true ? <CaretRight aria-hidden="true" weight="bold" /> : <CaretDown aria-hidden="true" weight="bold" />}
+          <span>{data.collapsed === true ? text.expandBlock : text.collapseBlock}</span>
+        </button>
+      )}
+      {data.container && data.collapsible !== true && (
         <div className="flow-playground-node__child-label">
           <span>{text.childCanvas}</span>
           <code>{data.dagNode.id}</code>

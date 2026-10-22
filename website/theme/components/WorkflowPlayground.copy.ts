@@ -112,6 +112,10 @@ export type WorkflowPlaygroundCopy = {
   targetHandle: (name: string) => string;
   childCanvas: string;
   internalNode: string;
+  expandBlock: string;
+  collapseBlock: string;
+  expandAllBlocks: string;
+  collapseAllBlocks: string;
   localRun: string;
   triggerDialogEyebrow: string;
   triggerDialogTitle: string;
@@ -269,6 +273,10 @@ export const workflowPlaygroundCopy: Readonly<
     targetHandle: (name) => `${name}输入端口`,
     childCanvas: '子画布',
     internalNode: '内部节点',
+    expandBlock: '展开',
+    collapseBlock: '收起',
+    expandAllBlocks: '全部展开',
+    collapseAllBlocks: '全部收起',
     localRun: '试运行只展示本地执行顺序，不会调用外部任务。',
     triggerDialogEyebrow: '运行触发器',
     triggerDialogTitle: '填写触发器输入',
@@ -429,6 +437,10 @@ export const workflowPlaygroundCopy: Readonly<
     targetHandle: (name) => `${name} input port`,
     childCanvas: 'Child canvas',
     internalNode: 'Internal node',
+    expandBlock: 'Expand',
+    collapseBlock: 'Collapse',
+    expandAllBlocks: 'Expand all',
+    collapseAllBlocks: 'Collapse all',
     localRun:
       'The test run only previews local execution order and never calls external tasks.',
     triggerDialogEyebrow: 'Run trigger',

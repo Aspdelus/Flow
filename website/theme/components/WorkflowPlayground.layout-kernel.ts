@@ -314,6 +314,8 @@ export function resizePlaygroundContainerToFitChildren(
 ): PlaygroundGraphState {
   const container = graph.nodes.find(({ id }) => id === containerId);
   if (!container || !container.data.container) return graph;
+  // A collapsed container keeps its card size; its contents are hidden.
+  if (container.data.collapsed === true) return graph;
   const children = graph.nodes.filter((node) => node.parentId === containerId);
 
   // A node can arrive here from a pointer drop before React Flow has had a

@@ -231,6 +231,62 @@ body:has(.a3s-workflow-playground) :where(#root, #app) {
   pointer-events: none;
 }
 
+/* W30: a business block or sub-plan opens and collapses in place. */
+.a3s-workflow-node-shell .flow-playground-node__collapse {
+  position: absolute;
+  z-index: 5;
+  right: 10px;
+  bottom: 8px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 9px;
+  border: 1px solid var(--workflow-line);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.96);
+  color: var(--workflow-muted);
+  cursor: pointer;
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.a3s-workflow-node-shell .flow-playground-node__collapse:hover,
+.a3s-workflow-node-shell .flow-playground-node__collapse:focus-visible {
+  border-color: var(--workflow-blue, #155eef);
+  color: var(--workflow-blue, #155eef);
+}
+
+.a3s-workflow-node-shell .flow-playground-node__collapse svg {
+  width: 11px;
+  height: 11px;
+}
+
+/* A collapsed card shows its title and objectives, not an empty scope. */
+.a3s-workflow-node-shell.is-collapsed
+  .a3s-form-workflow-node-preview-container {
+  display: none;
+}
+
+.a3s-workflow-node-shell.is-collapsed
+  .a3s-form-flow-node-preview[data-node-shape='container']
+  .a3s-form-workflow-node-preview-description {
+  display: -webkit-box;
+  max-height: calc(4.2em + 6px);
+  padding: 4px 14px 0;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+/* The port summary line says nothing about a block. */
+.a3s-workflow-node-shell.is-collapsed
+  .a3s-form-workflow-node-preview
+  > footer {
+  display: none;
+}
+
 .a3s-workflow-node-shell .flow-playground-node__child-label code {
   font-family: var(--workflow-mono);
   font-size: 9px;
