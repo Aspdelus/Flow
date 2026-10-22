@@ -112,6 +112,7 @@ import {
   hostWorkingCanvas,
   isHostRunExecutionActive,
   isProposalNotYetReady,
+  loadHostPlanningFailure,
   isProposalRefused,
   isRunNotYetCreated,
   listHostRuns,
@@ -441,13 +442,31 @@ function WorkflowPlaygroundSurface({
         })
         .catch((error: unknown) => {
           if (cancelled) return;
-          if (
-            (isProposalNotYetReady(error) ||
-              isRunNotYetCreated(error, runId)) &&
-            Date.now() < deadline
-          ) {
+          if (isRunNotYetCreated(error, runId) && Date.now() < deadline) {
             setHostPlanning(true);
             window.setTimeout(attempt, POLL_INTERVAL_MS);
+            return;
+          }
+          if (isProposalNotYetReady(error) && Date.now() < deadline) {
+            // A failed run answers like one still planning: ask the run.
+            void loadHostPlanningFailure(hostMode)
+              .catch(() => null)
+              .then((failure) => {
+                if (cancelled) return;
+                if (failure === null) {
+                  setHostPlanning(true);
+                  window.setTimeout(attempt, POLL_INTERVAL_MS);
+                  return;
+                }
+                setHostPlanning(false);
+                const message =
+                  locale === 'zh'
+                    ? `规划失败：${failure}`
+                    : `Planning failed: ${failure}`;
+                setHostLoadError(message);
+                setAnnouncement(message);
+                setHostBusy(false);
+              });
             return;
           }
           setHostPlanning(false);
@@ -2394,7 +2413,11 @@ function WorkflowPlaygroundSurface({
         }
       />
       {hostLoadError ? (
-        <p data-testid="host-load-error" role="alert">
+        <p
+          className="a3s-workflow-load-error"
+          data-testid="host-load-error"
+          role="alert"
+        >
           {hostLoadError}
         </p>
       ) : null}

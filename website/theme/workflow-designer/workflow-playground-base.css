@@ -379,6 +379,27 @@
   height: 16px;
 }
 
+/* Why the host canvas could not load (a failed or refused planning): above the
+   stage, which would otherwise cover it. */
+.a3s-workflow-load-error {
+  position: absolute;
+  z-index: 40;
+  top: calc(var(--workflow-header-height) + 14px);
+  left: 50%;
+  max-width: min(720px, calc(100% - 140px));
+  margin: 0;
+  padding: 10px 16px;
+  border: 1px solid var(--workflow-danger-line);
+  border-radius: 10px;
+  background: var(--workflow-red-soft);
+  box-shadow: var(--workflow-shadow-floating);
+  color: var(--workflow-red);
+  font-size: 13px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+  transform: translateX(-50%);
+}
+
 .a3s-workflow-stage {
   position: absolute;
   top: var(--workflow-header-height);

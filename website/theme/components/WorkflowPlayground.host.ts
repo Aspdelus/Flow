@@ -267,6 +267,23 @@ export async function loadHostPlanRefusal(
   return codes;
 }
 
+/**
+ * Why a run that has no proposal yet will never get one: the run failed
+ * (e.g. the host refused the planner's proposal). `GET /v1/runs/{id}/proposal`
+ * answers a failed run with the same "no verified proposal" 400 as one still
+ * planning, so without this the canvas polled a dead run until its timeout,
+ * showing "wrapping up" (B120). `null` while the run is not failed.
+ */
+export async function loadHostPlanningFailure(
+  config: HostModeConfig,
+): Promise<string | null> {
+  const client = createHostClient(config);
+  const snapshot = await client.getRun(config.runId);
+  if (snapshot.status !== 'failed') return null;
+  const error = typeof snapshot.error === 'string' ? snapshot.error.trim() : '';
+  return error.replace(/^runtime error:\s*/, '') || 'failed';
+}
+
 /** True for `GET /v1/runs/{id}/proposal`'s 400 on a run whose plan step
  * finished without a proposal (a refusal), as opposed to one still planning. */
 export function isProposalRefused(error: unknown): boolean {

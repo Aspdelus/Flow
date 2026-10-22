@@ -55,6 +55,7 @@ import {
   isRunNotYetCreated,
   listHostRuns,
   loadHostPlanRefusal,
+  loadHostPlanningFailure,
   loadHostRunTaskText,
   loadHostRecoveryFailure,
   loadHostRunExecution,
@@ -1689,6 +1690,39 @@ describe('WorkflowPlayground host mode', () => {
           }),
       );
       expect(await loadHostPlanRefusal(config)).toBeNull();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('loadHostPlanningFailure reports a failed run and nothing for one still planning', async () => {
+    const snapshot = (body: object) =>
+      new Response(JSON.stringify(body), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    const fetchImpl = vi.fn(async () =>
+      snapshot({
+        status: 'failed',
+        error:
+          'runtime error: CAPABILITY_MISMATCH: shortlist query task_text_digest differs from the task envelope',
+      }),
+    );
+    vi.stubGlobal('fetch', fetchImpl);
+    try {
+      const config = {
+        baseUrl: 'http://127.0.0.1:9',
+        runId: 'run-1',
+        tenantId: 'tenant-local-validation',
+        principalRef: 'reviewer@local',
+      };
+      expect(await loadHostPlanningFailure(config)).toBe(
+        'CAPABILITY_MISMATCH: shortlist query task_text_digest differs from the task envelope',
+      );
+      fetchImpl.mockImplementationOnce(async () => snapshot({ status: 'running' }));
+      expect(await loadHostPlanningFailure(config)).toBeNull();
+      fetchImpl.mockImplementationOnce(async () => snapshot({ status: 'failed' }));
+      expect(await loadHostPlanningFailure(config)).toBe('failed');
     } finally {
       vi.unstubAllGlobals();
     }
