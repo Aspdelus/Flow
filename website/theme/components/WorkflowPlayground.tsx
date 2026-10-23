@@ -91,6 +91,8 @@ import {
   hostCopilotSubplan,
   copilotReplyOutcome,
   beginNewRun,
+  beginRunAgain,
+  type HostRunInputChoice,
   createHostClient,
   graphFromHostCanvas,
   EMPTY_HOST_DRAFT,
@@ -182,6 +184,7 @@ import { WorkflowPlaygroundRegistryContext } from './WorkflowPlayground.registry
 import { WorkflowPlaygroundGateDialog } from './WorkflowPlaygroundGateDialog';
 import { WorkflowPlaygroundHostStepEditor } from './WorkflowPlaygroundHostStepEditor';
 import { WorkflowPlaygroundRecoveryDialog } from './WorkflowPlaygroundRecoveryDialog';
+import { WorkflowPlaygroundRunAgainDialog } from './WorkflowPlaygroundRunAgainDialog';
 import type { WorkflowPlaygroundRecoveryEdit } from './WorkflowPlaygroundRecoveryDialog';
 import { WorkflowPlaygroundTriggerDialog } from './WorkflowPlaygroundTriggerDialog';
 import {
@@ -281,6 +284,14 @@ function WorkflowPlaygroundSurface({
   const [hostTaskText, setHostTaskText] = useState<string | null>(null);
   // The files the run was started with (W31), shown on its start node.
   const [hostInputFiles, setHostInputFiles] = useState<HostRunInputFile[]>([]);
+  // W31: the run whose approved workflow this run runs again, and whether
+  // this run's own plan was approved (then it can run again).
+  const [hostReusedFrom, setHostReusedFrom] = useState<string | null>(null);
+  const [hostRunApproved, setHostRunApproved] = useState(false);
+  const [runAgainOpen, setRunAgainOpen] = useState(false);
+  const [runAgainBusy, setRunAgainBusy] = useState(false);
+  const [runAgainError, setRunAgainError] = useState<string | null>(null);
+  const [runAgainProgress, setRunAgainProgress] = useState<{ done: number; total: number } | null>(null);
   // Latest planning *phase* frame (kind: "phase"); drafts stay in
   // hostProgress so a later phase frame never hides the last draft.
   const [hostPlanningPhase, setHostPlanningPhase] =
@@ -637,16 +648,20 @@ function WorkflowPlaygroundSurface({
   useEffect(() => {
     setHostTaskText(null);
     setHostInputFiles([]);
+    setHostReusedFrom(null);
+    setHostRunApproved(false);
     if (!hostMode?.runId) return;
     let cancelled = false;
     let timer: number | undefined;
     let tries = 0;
     const attempt = (): void => {
       void loadHostRunInput(hostMode)
-        .then(({ taskText, inputFiles }) => {
+        .then(({ taskText, inputFiles, reusedFrom, approved }) => {
           if (cancelled) return;
           setHostTaskText(taskText);
           setHostInputFiles(inputFiles);
+          setHostReusedFrom(reusedFrom);
+          setHostRunApproved(approved);
         })
         .catch(() => {
           if (cancelled || ++tries >= 10) return;
@@ -658,7 +673,9 @@ function WorkflowPlaygroundSurface({
       cancelled = true;
       if (timer !== undefined) window.clearTimeout(timer);
     };
-  }, [hostMode]);
+    // Read again once the run moves on (approved, finished): it can then run again.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hostMode, hostExecution?.status]);
 
   useEffect(() => {
     if (!hostPlanning) {
@@ -1911,12 +1928,38 @@ function WorkflowPlaygroundSurface({
   // WorkflowPlaygroundNewRunDialog's doc comment). Navigates to the new
   // run's URL on success, mirroring selectHostRun exactly; throws on
   // failure so the dialog can show the error and stay open.
+  // W31: the workflow this run was approved with, run again with new files
+  // in some of its input slots.  Like a new task, the page moves to the new
+  // run as soon as the files are up; it waits there for approval.
+  const submitRunAgainOnHost = useCallback(
+    async (changed: HostRunInputChoice[]) => {
+      if (!hostMode?.runId) return;
+      setRunAgainBusy(true);
+      setRunAgainError(null);
+      setRunAgainProgress(changed.length > 0 ? { done: 0, total: changed.length } : null);
+      try {
+        const { runId, uploaded } = beginRunAgain(hostMode, hostMode.runId, changed, (done, total) =>
+          setRunAgainProgress({ done, total }),
+        );
+        await uploaded;
+        setRunAgainOpen(false);
+        selectHostRun(runId);
+      } catch (error: unknown) {
+        setRunAgainError(error instanceof Error ? error.message : String(error));
+      } finally {
+        setRunAgainBusy(false);
+        setRunAgainProgress(null);
+      }
+    },
+    [hostMode, selectHostRun],
+  );
+
   const submitNewRunOnHost = useCallback(
     async (
       taskText: string,
       permissionCeiling: string[],
       subplans: HostSubplanMode,
-      inputFiles: File[],
+      inputFiles: HostRunInputChoice[],
       onUploaded?: (done: number, total: number) => void,
     ) => {
       if (!hostMode) return;
@@ -2440,6 +2483,14 @@ function WorkflowPlaygroundSurface({
           setActivePanel('settings');
         }}
         onHostReplan={hostEdits?.save ? replanOnHost : undefined}
+        onHostRunAgain={
+          hostMode?.runId && hostRunApproved
+            ? () => {
+                setRunAgainError(null);
+                setRunAgainOpen(true);
+              }
+            : undefined
+        }
         onHostSave={hostEdits?.save ? saveToHost : undefined}
         onOpenDocument={openDocument}
         onOpenExtensions={toggleExtensions}
@@ -2521,6 +2572,25 @@ function WorkflowPlaygroundSurface({
           role="alert"
         >
           {hostLoadError}
+        </p>
+      ) : null}
+      {hostReusedFrom && !hostRunApproved ? (
+        <p className="a3s-workflow-reused-notice" data-testid="host-reused-from" role="status">
+          {locale === 'zh'
+            ? '这是已批准工作流的再跑：计划与运行 '
+            : 'A run of an approved workflow: the plan is the one run '}
+          <a
+            href={`?${new URLSearchParams({ ...Object.fromEntries(new URLSearchParams(window.location.search)), runId: hostReusedFrom }).toString()}`}
+            onClick={(event) => {
+              event.preventDefault();
+              selectHostRun(hostReusedFrom);
+            }}
+          >
+            {hostReusedFrom}
+          </a>
+          {locale === 'zh'
+            ? ' 批准的完全相同（没有重新规划），只换了输入文件。确认后点"批准"开始。'
+            : ' was approved with (not planned anew); only the input files differ. Approve to start.'}
         </p>
       ) : null}
       <noscript>
@@ -2858,13 +2928,14 @@ function WorkflowPlaygroundSurface({
                   <h3>{locale === 'zh' ? '输入文件' : 'Input files'}</h3>
                   <p>
                     {locale === 'zh'
-                      ? '随任务一起提交，各步骤在工作区的 inputs/ 下读取。'
-                      : "Given with the task; every step reads them under its workspace's inputs/."}
+                      ? '工作流按输入名读文件（task.<输入名>）；"换文件再跑"时同一个输入名换上新文件。'
+                      : 'The workflow reads each file by its input name (task.<name>); running it again puts a new file under the same name.'}
                   </p>
                   <ul>
                     {hostInputFiles.map((file) => (
-                      <li key={file.name}>
-                        <code>inputs/{file.name}</code>
+                      <li key={file.slot}>
+                        <code>task.{file.slot}</code>
+                        <span>{file.name}</span>
                         <small>{formatHostBytes(file.bytes)}</small>
                       </li>
                     ))}
@@ -3001,6 +3072,18 @@ function WorkflowPlaygroundSurface({
               })
               .finally(() => setGateBusy(false));
           }}
+        />
+      )}
+
+      {runAgainOpen && (
+        <WorkflowPlaygroundRunAgainDialog
+          busy={runAgainBusy}
+          error={runAgainError}
+          inputFiles={hostInputFiles}
+          locale={locale}
+          onClose={() => setRunAgainOpen(false)}
+          onSubmit={(changed) => void submitRunAgainOnHost(changed)}
+          uploadProgress={runAgainProgress}
         />
       )}
 

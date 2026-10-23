@@ -127,12 +127,24 @@ export type FlowTaskEnvelope = {
   approval_token: string;
 };
 
-/** One input file of a run (W31), as `PUT /v1/runs/{run_id}/inputs/{name}`
- * answers it and the run's envelope lists it. */
+/** One input file of a run (W31), as `PUT /v1/runs/{run_id}/inputs/{slot}`
+ * answers it and the run's envelope lists it.  The plan reads it by its
+ * slot (`task.<slot>`), so the same workflow runs again with another file
+ * in the slot. */
 export type HostRunInputFile = {
+  slot: string;
   name: string;
   bytes: number;
   sha256: string;
+};
+
+/** `POST /v1/runs` body that runs the workflow run `from_run` was approved
+ * with again (W31): new files in the slots `input_files` names, the others
+ * keep `from_run`'s; the run waits for its own approval. */
+export type FlowRunAgainRequest = {
+  from_run: string;
+  approval_token: string;
+  input_files?: HostRunInputFile[];
 };
 
 function trimTrailingSlash(url: string): string {
@@ -668,7 +680,8 @@ export class FlowHostClient {
   }
 
   /**
-   * `POST /v1/runs` -- start a genuinely new run against the host catalog,
+   * `POST /v1/runs` -- start a genuinely new run against the host catalog
+   * (or, with a {@link FlowRunAgainRequest}, run an approved workflow again),
    * unconstrained by any other run's frozen candidate set. `runId` is
    * caller-chosen (the host does not
    * generate one); reusing an existing id with a different envelope is
@@ -677,7 +690,7 @@ export class FlowHostClient {
    */
   async startRun(
     runId: string,
-    envelope: FlowTaskEnvelope,
+    envelope: FlowTaskEnvelope | FlowRunAgainRequest,
   ): Promise<{ status: number; json: JsonObject }> {
     if (!runId.trim()) {
       throw new HostClientError('INVALID_INPUT: runId is required');
@@ -707,17 +720,20 @@ export class FlowHostClient {
    */
   async putRunInput(
     runId: string,
+    slot: string,
     name: string,
     content: Blob,
   ): Promise<HostRunInputFile> {
-    if (!runId.trim() || !name) {
-      throw new HostClientError('INVALID_INPUT: runId and name are required');
+    if (!runId.trim() || !slot || !name) {
+      throw new HostClientError(
+        'INVALID_INPUT: runId, slot and name are required',
+      );
     }
     let response: Response;
     try {
       response = await this.fetchImpl(
         this.url(
-          `/v1/runs/${encodeURIComponent(runId)}/inputs/${encodeURIComponent(name)}`,
+          `/v1/runs/${encodeURIComponent(runId)}/inputs/${encodeURIComponent(slot)}?name=${encodeURIComponent(name)}`,
         ),
         {
           method: 'PUT',
@@ -752,6 +768,7 @@ export class FlowHostClient {
       );
     }
     if (
+      typeof json.slot !== 'string' ||
       typeof json.name !== 'string' ||
       typeof json.bytes !== 'number' ||
       typeof json.sha256 !== 'string'
@@ -760,7 +777,12 @@ export class FlowHostClient {
         `INVALID_INPUT: the host's answer to uploading ${name} is malformed`,
       );
     }
-    return { name: json.name, bytes: json.bytes, sha256: json.sha256 };
+    return {
+      slot: json.slot,
+      name: json.name,
+      bytes: json.bytes,
+      sha256: json.sha256,
+    };
   }
 
   /**

@@ -13,6 +13,8 @@ import {
   addHostPlanStep,
   applyCopilotSteps,
   beginNewRun,
+  beginRunAgain,
+  hostDefaultSlot,
   formatHostBytes,
   hostRunInputProblem,
   hostStartWithInputFiles,
@@ -1555,41 +1557,73 @@ describe('WorkflowPlayground host mode', () => {
     }
   });
 
-  it('beginNewRun uploads the input files first, then starts the run listing them (W31)', async () => {
+  // A fake host for the W31 tests: answers each upload with its slot and
+  // file name, records every call and the start's body.
+  function fakeUploads() {
     const calls: string[] = [];
-    let started: Record<string, unknown> = {};
+    const bodies: Record<string, unknown>[] = [];
     const fetchImpl = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-      const url = String(input);
-      calls.push(`${init?.method} ${url.replace('http://127.0.0.1:9', '')}`);
+      const url = new URL(String(input));
+      calls.push(`${init?.method} ${decodeURIComponent(url.pathname + url.search)}`);
       if (init?.method === 'PUT') {
-        const name = decodeURIComponent(url.slice(url.lastIndexOf('/') + 1));
-        return new Response(JSON.stringify({ name, bytes: 3, sha256: `sha256:${name}` }), { status: 200 });
+        const slot = decodeURIComponent(url.pathname.slice(url.pathname.lastIndexOf('/') + 1));
+        const name = url.searchParams.get('name');
+        return new Response(JSON.stringify({ slot, name, bytes: 3, sha256: `sha256:${slot}` }), { status: 200 });
       }
-      started = JSON.parse(String(init?.body));
+      bodies.push(JSON.parse(String(init?.body)));
       return new Response(JSON.stringify({ status: 'suspended' }), { status: 200 });
     });
     vi.stubGlobal('fetch', fetchImpl);
-    const config = { baseUrl: 'http://127.0.0.1:9', runId: '', tenantId: 't', principalRef: 'p' };
+    return { calls, bodies };
+  }
+  const w31Config = { baseUrl: 'http://127.0.0.1:9', runId: '', tenantId: 't', principalRef: 'p' };
+  const choice = (slot: string, name: string) => ({ slot, file: new File(['abc'], name) });
+
+  it('beginNewRun uploads each file to its slot first, then starts the run listing them (W31)', async () => {
+    const { calls, bodies } = fakeUploads();
     try {
       const progress: string[] = [];
-      const run = beginNewRun(config, 'a task', ['read'], 'auto', [new File(['abc'], 'sales.csv'), new File(['def'], '需求.md')], (done, total) => progress.push(`${done}/${total}`));
+      const run = beginNewRun(w31Config, 'a task', ['read'], 'auto', [choice('sales', 'q3.csv'), choice('brief', '需求.md')], (done, total) => progress.push(`${done}/${total}`));
       await run.uploaded;
       await run.started;
       expect(calls).toEqual([
-        `PUT /v1/runs/${run.runId}/inputs/sales.csv`,
-        `PUT /v1/runs/${run.runId}/inputs/${encodeURIComponent('需求.md')}`,
+        `PUT /v1/runs/${run.runId}/inputs/sales?name=q3.csv`,
+        `PUT /v1/runs/${run.runId}/inputs/brief?name=需求.md`,
         'POST /v1/runs',
       ]);
       expect(progress).toEqual(['1/2', '2/2']);
-      expect(started.input_files).toEqual([
-        { name: 'sales.csv', bytes: 3, sha256: 'sha256:sales.csv' },
-        { name: '需求.md', bytes: 3, sha256: 'sha256:需求.md' },
+      expect(bodies[0].input_files).toEqual([
+        { slot: 'sales', name: 'q3.csv', bytes: 3, sha256: 'sha256:sales' },
+        { slot: 'brief', name: '需求.md', bytes: 3, sha256: 'sha256:brief' },
       ]);
       // Without files nothing is uploaded and the envelope has no input_files.
       calls.length = 0;
-      await beginNewRun(config, 'a task', ['read']).started;
+      await beginNewRun(w31Config, 'a task', ['read']).started;
       expect(calls).toEqual(['POST /v1/runs']);
-      expect('input_files' in started).toBe(false);
+      expect('input_files' in bodies[1]).toBe(false);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('beginRunAgain uploads only the changed slots and starts from the approved run (W31)', async () => {
+    const { calls, bodies } = fakeUploads();
+    try {
+      const run = beginRunAgain(w31Config, 'run-template', [choice('sales', 'q4.csv')]);
+      await run.started;
+      expect(calls).toEqual([`PUT /v1/runs/${run.runId}/inputs/sales?name=q4.csv`, 'POST /v1/runs']);
+      expect(bodies[0]).toMatchObject({
+        run_id: run.runId,
+        from_run: 'run-template',
+        input_files: [{ slot: 'sales', name: 'q4.csv', bytes: 3, sha256: 'sha256:sales' }],
+      });
+      expect(Object.keys(bodies[0]).sort()).toEqual(['approval_token', 'from_run', 'input_files', 'run_id']);
+      expect(pendingRunStart(run.runId)).toBeUndefined();
+      // Every slot kept: no upload, no input_files.
+      calls.length = 0;
+      await beginRunAgain(w31Config, 'run-template').started;
+      expect(calls).toEqual(['POST /v1/runs']);
+      expect('input_files' in bodies[1]).toBe(false);
     } finally {
       vi.unstubAllGlobals();
     }
@@ -1602,7 +1636,7 @@ describe('WorkflowPlayground host mode', () => {
       return new Response(JSON.stringify({ error: 'INVALID_INPUT: this host has no per-run workspaces' }), { status: 400 });
     }));
     try {
-      const run = beginNewRun({ baseUrl: 'http://127.0.0.1:9', runId: '', tenantId: 't', principalRef: 'p' }, 'a task', ['read'], 'auto', [new File(['x'], 'a.csv')]);
+      const run = beginNewRun(w31Config, 'a task', ['read'], 'auto', [choice('a', 'a.csv')]);
       await expect(run.uploaded).rejects.toThrow('no per-run workspaces');
       await expect(run.started).rejects.toThrow('no per-run workspaces');
       expect(calls).toEqual(['PUT']);
@@ -1611,41 +1645,77 @@ describe('WorkflowPlayground host mode', () => {
     }
   });
 
-  it('checks the chosen files against the host limits before uploading (W31)', () => {
-    const file = (name: string, size = 10) => ({ name, size });
-    expect(hostRunInputProblem([file('sales.csv'), file('需求 说明.md')], 'zh')).toBeNull();
+  it('names each file slot after the file, never twice and never goal (W31)', () => {
+    expect(hostDefaultSlot('Q3 Sales.csv', [])).toBe('q3_sales');
+    expect(hostDefaultSlot('sales.csv', ['sales'])).toBe('sales_1');
+    expect(hostDefaultSlot('sales.csv', ['sales', 'sales_1'])).toBe('sales_2');
+    expect(hostDefaultSlot('需求.md', [])).toBe('file_1');
+    expect(hostDefaultSlot('需求说明.md', ['file_1'])).toBe('file_2');
+    expect(hostDefaultSlot('goal.txt', [])).toBe('file_1');
+    expect(hostDefaultSlot('README', [])).toBe('readme');
+    expect(hostDefaultSlot(`${'a'.repeat(80)}.csv`, []).length).toBeLessThanOrEqual(64);
+  });
+
+  it('checks the chosen files and their slots against the host limits before uploading (W31)', () => {
+    const file = (name: string, size = 10, slot = name.replace(/\W/gu, '_').toLowerCase().replace(/^_+|_+$/gu, '') || 'x') => ({ slot, name, size });
+    expect(hostRunInputProblem([file('sales.csv'), file('需求 说明.md', 10, 'brief')], 'zh')).toBeNull();
     for (const bad of ['.env', '.hidden', 'a/b.csv', 'server.pem', 'id_rsa', ' x.csv'])
-      expect(hostRunInputProblem([file(bad)], 'en'), bad).not.toBeNull();
-    expect(hostRunInputProblem([file('a.csv'), file('a.csv')], 'en')).toContain('Two files');
+      expect(hostRunInputProblem([file(bad, 10, 'data')], 'en'), bad).not.toBeNull();
+    for (const slot of ['', 'Sales', 'a.b', '-x', 'goal', '销售'])
+      expect(hostRunInputProblem([file('a.csv', 10, slot)], 'en'), slot).toContain('input name');
+    expect(hostRunInputProblem([file('a.csv', 10, 's'), file('b.csv', 10, 's')], 'en')).toContain('Two files use');
     expect(hostRunInputProblem([file('big.bin', 20 * 1024 * 1024 + 1)], 'zh')).toContain('超过 20 MB');
     expect(hostRunInputProblem(Array.from({ length: 21 }, (_, index) => file(`f${index}.txt`)), 'zh')).toContain('最多 20');
     expect(hostRunInputProblem(Array.from({ length: 6 }, (_, index) => file(`f${index}.bin`, 18 * 1024 * 1024)), 'en')).toContain('together');
     expect([formatHostBytes(512), formatHostBytes(12 * 1024), formatHostBytes(3.4 * 1024 * 1024)]).toEqual(['512 B', '12 KB', '3.4 MB']);
   });
 
-  it('reads the run input back and lists its files on the start node only (W31)', async () => {
+  it('reads the run input back and lists its slots on the start node only (W31)', async () => {
     vi.stubGlobal('fetch', vi.fn(async () =>
       new Response(JSON.stringify({
-        status: 'suspended',
-        input: { task_text: ' a task ', input_files: [{ name: 'sales.csv', bytes: 12288, sha256: 'sha256:x' }, { name: 7 }] },
+        status: 'completed',
+        input: {
+          task_text: ' a task ',
+          input_files: [{ slot: 'sales', name: 'q3.csv', bytes: 12288, sha256: 'sha256:x' }, { name: 7 }, { name: 'no-slot.csv', bytes: 1, sha256: 's' }],
+          reuse: { from_run: 'run-0', proposal: {} },
+        },
+        hooks: { approval: { payload: { approved: true } }, 'gate:x': { payload: { approved: true } } },
       }), { status: 200 }),
     ));
     try {
       const read = await loadHostRunInput({ baseUrl: 'http://127.0.0.1:9', runId: 'run-1', tenantId: 't', principalRef: 'p' });
-      expect(read).toEqual({ taskText: 'a task', inputFiles: [{ name: 'sales.csv', bytes: 12288, sha256: 'sha256:x' }] });
+      expect(read).toEqual({
+        taskText: 'a task',
+        inputFiles: [{ slot: 'sales', name: 'q3.csv', bytes: 12288, sha256: 'sha256:x' }],
+        reusedFrom: 'run-0',
+        approved: true,
+      });
       const plan = {
-        steps: [{ step_id: 'read', agent_id: 'reader', version: '1.0.0', objective: 'read the sales', inputs: ['task.goal'], outputs: ['text'] }],
+        steps: [{ step_id: 'read', agent_id: 'reader', version: '1.0.0', objective: 'read the sales', inputs: ['task.sales'], outputs: ['text'] }],
         edges: [],
         execution_order: ['read'],
       };
       const graph = graphFromHostCanvas(canvasDocumentFromProposalDto({ run_id: 'run-1', proposal: { plan } }), 'zh', hostCatalog());
       const shown = hostStartWithInputFiles(graph, read.inputFiles, 'zh');
       const start = shown.nodes.find((node) => node.id === 'start')!;
-      expect(String(start.data.dagNode.data.desc)).toContain('输入文件: sales.csv（12 KB）');
+      expect(String(start.data.dagNode.data.desc)).toContain('输入文件: sales = q3.csv（12 KB）');
       expect(start.data.hostInputFiles).toEqual(read.inputFiles);
       // Shown only: the plan saved from the graph is unchanged.
       expect(shown.nodes.filter((node) => node.id !== 'start')).toEqual(graph.nodes.filter((node) => node.id !== 'start'));
       expect(hostStartWithInputFiles(graph, [], 'zh')).toBe(graph);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('a run whose plan was rejected cannot run again (W31)', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () =>
+      // A rejected plan, and a mid-plan gate someone approved, are no approval of the plan.
+      new Response(JSON.stringify({ status: 'completed', input: { task_text: 't' }, hooks: { approval: { payload: { approved: false } }, 'gate:check': { payload: { approved: true } } } }), { status: 200 }),
+    ));
+    try {
+      const read = await loadHostRunInput({ baseUrl: 'http://127.0.0.1:9', runId: 'run-1', tenantId: 't', principalRef: 'p' });
+      expect([read.approved, read.reusedFrom]).toEqual([false, null]);
     } finally {
       vi.unstubAllGlobals();
     }

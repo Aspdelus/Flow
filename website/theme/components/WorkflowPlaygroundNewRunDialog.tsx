@@ -3,7 +3,12 @@ import { useEffect, useId, useRef, useState, type FormEvent } from 'react';
 import type { FlowWebsiteLocale } from './flow-node-catalog';
 import { SelectControl } from '@a3s-lab/flow-ui/react';
 import type { HostSubplanMode } from '@a3s-lab/flow-ui';
-import { formatHostBytes, hostRunInputProblem } from './WorkflowPlayground.host';
+import {
+  formatHostBytes,
+  hostDefaultSlot,
+  hostRunInputProblem,
+  type HostRunInputChoice,
+} from './WorkflowPlayground.host';
 
 const PERMISSION_CEILING_PRESETS = ['read', 'read,write'] as const;
 const SUBPLAN_MODES: readonly HostSubplanMode[] = ['auto', 'encouraged', 'forbidden'];
@@ -18,16 +23,25 @@ export type WorkflowPlaygroundNewRunDialogProps = {
     taskText: string,
     permissionCeiling: string[],
     subplans: HostSubplanMode,
-    inputFiles: File[],
+    inputFiles: HostRunInputChoice[],
   ) => void;
   /** While the input files are being uploaded (W31). */
   uploadProgress?: { done: number; total: number } | null;
 };
 
-/** `files` with `added` appended; a file of the same name replaces the earlier one. */
-export function withAddedInputFiles(files: readonly File[], added: readonly File[]): File[] {
-  const names = new Set(added.map((file) => file.name));
-  return [...files.filter((file) => !names.has(file.name)), ...added];
+/** `files` with `added` appended, each in a slot named after it; a file of
+ * the same name replaces the earlier one in its slot. */
+export function withAddedInputFiles(
+  files: readonly HostRunInputChoice[],
+  added: readonly File[],
+): HostRunInputChoice[] {
+  const next = [...files];
+  for (const file of added) {
+    const same = next.findIndex((choice) => choice.file.name === file.name);
+    if (same >= 0) next[same] = { ...next[same], file };
+    else next.push({ slot: hostDefaultSlot(file.name, next.map((choice) => choice.slot)), file });
+  }
+  return next;
 }
 
 /**
@@ -61,8 +75,11 @@ export function WorkflowPlaygroundNewRunDialog({
   const [subplans, setSubplans] = useState<HostSubplanMode>('auto');
   // Files only this run gets (W31): uploaded before it starts, then in its
   // workspace under inputs/.
-  const [inputFiles, setInputFiles] = useState<File[]>([]);
-  const inputProblem = hostRunInputProblem(inputFiles, locale);
+  const [inputFiles, setInputFiles] = useState<HostRunInputChoice[]>([]);
+  const inputProblem = hostRunInputProblem(
+    inputFiles.map(({ slot, file }) => ({ slot, name: file.name, size: file.size })),
+    locale,
+  );
 
   useEffect(() => {
     previousFocus.current =
@@ -160,8 +177,10 @@ export function WorkflowPlaygroundNewRunDialog({
   const addFilesLabel = locale === 'zh' ? '添加文件' : 'Add files';
   const filesHint =
     locale === 'zh'
-      ? '只给这个任务：放进它的工作区 inputs/ 目录，规划时 AI 能看到文件名和文本文件的开头，各步骤可以读取。'
-      : "For this task only: put in its workspace's inputs/ folder; the planner sees the names and the start of text files, and every step can read them.";
+      ? '每个文件有一个输入名（可改）：工作流按输入名读文件，以后"换文件再跑"时同一个输入名换上新文件，工作流不变。文件放进这个任务工作区的 inputs/，AI 规划时能看到文件名和文本文件的开头。'
+      : 'Each file has an input name (editable): the workflow reads files by it, so running it again later puts a new file under the same name and keeps the workflow. Files go to this task\'s inputs/ folder; the planner sees their names and the start of text files.';
+  const slotLabel = (name: string) =>
+    locale === 'zh' ? `${name} 的输入名` : `Input name of ${name}`;
   const removeFileLabel = (name: string) =>
     locale === 'zh' ? `移除 ${name}` : `Remove ${name}`;
   const cancelLabel = locale === 'zh' ? '取消' : 'Cancel';
@@ -264,16 +283,30 @@ export function WorkflowPlaygroundNewRunDialog({
             <span>{filesLabel}</span>
             {inputFiles.length > 0 && (
               <ul className="a3s-new-run-dialog__files" data-testid="new-run-files">
-                {inputFiles.map((file) => (
-                  <li key={file.name}>
-                    <span>{file.name}</span>
-                    <small>{formatHostBytes(file.size)}</small>
+                {inputFiles.map((choice, index) => (
+                  <li key={choice.file.name}>
+                    <input
+                      aria-label={slotLabel(choice.file.name)}
+                      className="a3s-new-run-dialog__slot"
+                      data-testid="new-run-file-slot"
+                      disabled={busy}
+                      onChange={(event) => {
+                        const slot = event.currentTarget.value;
+                        setInputFiles((current) =>
+                          current.map((item, at) => (at === index ? { ...item, slot } : item)),
+                        );
+                      }}
+                      spellCheck={false}
+                      value={choice.slot}
+                    />
+                    <span>{choice.file.name}</span>
+                    <small>{formatHostBytes(choice.file.size)}</small>
                     <button
-                      aria-label={removeFileLabel(file.name)}
+                      aria-label={removeFileLabel(choice.file.name)}
                       disabled={busy}
                       onClick={() =>
                         setInputFiles((current) =>
-                          current.filter((item) => item !== file),
+                          current.filter((item) => item !== choice),
                         )
                       }
                       type="button"

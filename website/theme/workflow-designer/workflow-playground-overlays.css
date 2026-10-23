@@ -885,6 +885,49 @@
   color: var(--workflow-text);
 }
 
+/* A file's input name (slot): editable for a new task, shown when running again. */
+.a3s-new-run-dialog__slot,
+.a3s-new-run-dialog__slot-name {
+  flex: none;
+  width: 9em;
+  padding: 3px 6px;
+  border: 1px solid var(--workflow-line);
+  border-radius: 6px;
+  background: var(--workflow-surface);
+  color: var(--workflow-text);
+  font-family: var(--workflow-mono, ui-monospace, monospace);
+  font-size: 11px;
+}
+
+.a3s-new-run-dialog__slot-name {
+  overflow: hidden;
+  border-color: transparent;
+  background: transparent;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.a3s-new-run-dialog__slot:focus-visible {
+  border-color: var(--workflow-blue);
+  outline: none;
+}
+
+.a3s-new-run-dialog__files .a3s-new-run-dialog__add-files {
+  padding: 3px 8px;
+  font-size: 11px;
+}
+
+/* A run of an approved workflow, waiting for its approval (W31). */
+.a3s-workflow-reused-notice {
+  margin: 0;
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--workflow-line);
+  background: var(--workflow-surface-muted);
+  color: var(--workflow-text);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
 .a3s-new-run-dialog__add-files {
   position: relative;
   display: inline-flex;

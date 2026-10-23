@@ -41,11 +41,14 @@ describe('WorkflowPlaygroundNewRunDialog', () => {
     expect(render('en', { done: 0, total: 1 })).toContain('Uploading 0/1');
   });
 
-  it('adds chosen files, a file of the same name replacing the earlier one', () => {
+  it('adds chosen files each in a slot, a file of the same name replacing the earlier one in its slot', () => {
     const file = (name: string, body: string) => new File([body], name);
-    const first = [file('a.csv', '1'), file('b.md', '2')];
-    const next = withAddedInputFiles(first, [file('a.csv', 'newer'), file('c.txt', '3')]);
-    expect(next.map((item) => item.name)).toEqual(['b.md', 'a.csv', 'c.txt']);
-    expect(next[1].size).toBe(5);
+    const first = withAddedInputFiles([], [file('a.csv', '1'), file('b.md', '2')]);
+    expect(first.map((item) => item.slot)).toEqual(['a', 'b']);
+    // A slot the user renamed stays renamed when its file is chosen again.
+    const renamed = first.map((item) => (item.slot === 'a' ? { ...item, slot: 'sales' } : item));
+    const next = withAddedInputFiles(renamed, [file('a.csv', 'newer'), file('c.txt', '3'), file('a.txt', '4')]);
+    expect(next.map((item) => [item.slot, item.file.name])).toEqual([['sales', 'a.csv'], ['b', 'b.md'], ['c', 'c.txt'], ['a', 'a.txt']]);
+    expect(next[0].file.size).toBe(5);
   });
 });

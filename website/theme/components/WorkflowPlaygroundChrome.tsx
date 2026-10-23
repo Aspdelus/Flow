@@ -23,6 +23,7 @@ import {
   Play,
   Plus,
   Sparkle,
+  ArrowsClockwise,
   Stop,
   SealCheck,
   TreeStructure,
@@ -148,6 +149,8 @@ type PlaygroundHeaderProps = {
   onSelectPlanStep?: (stepId: string) => void;
   /** Ask the Orchestrator to plan the task again (the canvas goes along as a hint). */
   onHostReplan?: () => void;
+  /** Run this run's approved workflow again with other input files (W31). */
+  onHostRunAgain?: () => void;
   hostBusy?: boolean;
   onHostSave?: () => void;
   onHostApprove?: () => void;
@@ -391,6 +394,7 @@ export function WorkflowPlaygroundHeader({
   planOrigin,
   onSelectPlanStep,
   onHostReplan,
+  onHostRunAgain,
 }: PlaygroundHeaderProps) {
   const menuRef = useDismissibleDetails();
 
@@ -551,6 +555,22 @@ export function WorkflowPlaygroundHeader({
             <span>
               {locale === 'zh' ? '让 AI 重新规划' : 'Re-plan with AI'}
             </span>
+          </button>
+        ) : null}
+        {hostMode && onHostRunAgain ? (
+          <button
+            data-testid="host-run-again"
+            disabled={hostBusy}
+            onClick={onHostRunAgain}
+            title={
+              locale === 'zh'
+                ? '用这次批准过的工作流再跑一次，可以换输入文件，不重新规划'
+                : 'Run the approved workflow again, with other input files, without planning anew'
+            }
+            type="button"
+          >
+            <ArrowsClockwise aria-hidden="true" />
+            <span>{locale === 'zh' ? '换文件再跑' : 'Run again'}</span>
           </button>
         ) : null}
         {hostMode && onHostSave ? (

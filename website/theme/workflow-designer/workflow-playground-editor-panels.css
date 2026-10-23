@@ -1070,7 +1070,17 @@
   font-size: 12px;
 }
 
+.flow-playground-host-input-files li > span {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--workflow-muted);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .flow-playground-host-input-files code {
+  flex: none;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;

@@ -2,7 +2,7 @@ import { ArrowClockwise, Clock, Sparkle } from '@phosphor-icons/react';
 import { useState } from 'react';
 import type { FlowWebsiteLocale } from './flow-node-catalog';
 import type { HostSubplanMode } from '@a3s-lab/flow-ui';
-import type { HostRunSummary } from './WorkflowPlayground.host';
+import type { HostRunInputChoice, HostRunSummary } from './WorkflowPlayground.host';
 import { WorkflowPlaygroundNewRunDialog } from './WorkflowPlaygroundNewRunDialog';
 
 // Keys match Flow's WorkflowRunStatus JSON casing (serde rename_all =
@@ -53,7 +53,7 @@ export type WorkflowPlaygroundRunListProps = {
     taskText: string,
     permissionCeiling: string[],
     subplans: HostSubplanMode,
-    inputFiles: File[],
+    inputFiles: HostRunInputChoice[],
     onUploaded?: (done: number, total: number) => void,
   ) => Promise<void>;
 };
@@ -93,7 +93,7 @@ export function WorkflowPlaygroundRunList({
     taskText: string,
     permissionCeiling: string[],
     subplans: HostSubplanMode,
-    inputFiles: File[],
+    inputFiles: HostRunInputChoice[],
   ) => {
     setSubmitting(true);
     setSubmitError(null);

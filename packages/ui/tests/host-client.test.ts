@@ -162,14 +162,14 @@ describe('FlowHostClient', () => {
     );
   });
 
-  it('uploads a run input file as raw bytes with PUT, its name encoded (W31)', async () => {
+  it('uploads a run input file to its slot as raw bytes with PUT, its name encoded (W31)', async () => {
     const content = new Blob(['a,b\n1,2\n']);
     const fetchImpl = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
       // The file itself is the body, never JSON.
       expect(init?.body).toBe(content);
       expect((init?.headers as Record<string, string>)['Content-Type']).toBe('application/octet-stream');
       return new Response(
-        JSON.stringify({ name: '销售 数据.csv', bytes: 8, sha256: 'sha256:ab' }),
+        JSON.stringify({ slot: 'sales', name: '销售 数据.csv', bytes: 8, sha256: 'sha256:ab' }),
         { status: 200, headers: { 'Content-Type': 'application/json' } },
       );
     });
@@ -177,10 +177,10 @@ describe('FlowHostClient', () => {
       baseUrl: 'http://127.0.0.1:9',
       fetchImpl: fetchImpl as unknown as typeof fetch,
     });
-    const file = await client.putRunInput('run-1', '销售 数据.csv', content);
-    expect(file).toEqual({ name: '销售 数据.csv', bytes: 8, sha256: 'sha256:ab' });
+    const file = await client.putRunInput('run-1', 'sales', '销售 数据.csv', content);
+    expect(file).toEqual({ slot: 'sales', name: '销售 数据.csv', bytes: 8, sha256: 'sha256:ab' });
     expect(fetchImpl).toHaveBeenCalledWith(
-      `http://127.0.0.1:9/v1/runs/run-1/inputs/${encodeURIComponent('销售 数据.csv')}`,
+      `http://127.0.0.1:9/v1/runs/run-1/inputs/sales?name=${encodeURIComponent('销售 数据.csv')}`,
       expect.objectContaining({ method: 'PUT' }),
     );
   });
@@ -193,9 +193,23 @@ describe('FlowHostClient', () => {
           new Response(JSON.stringify(body), { status })) as unknown as typeof fetch,
       });
     await expect(
-      refusing(400, { error: 'INVALID_INPUT: input file .env looks like a credential file' }).putRunInput('run-1', '.env', new Blob(['x'])),
+      refusing(400, { error: 'INVALID_INPUT: input file .env looks like a credential file' }).putRunInput('run-1', 'env', '.env', new Blob(['x'])),
     ).rejects.toThrow('looks like a credential file');
-    await expect(refusing(200, { name: 'x' }).putRunInput('run-1', 'x', new Blob(['x']))).rejects.toThrow('malformed');
+    await expect(refusing(200, { name: 'x', bytes: 1, sha256: 's' }).putRunInput('run-1', 'x', 'x', new Blob(['x']))).rejects.toThrow('malformed');
+  });
+
+  it('runs an approved workflow again through POST /v1/runs with from_run (W31)', async () => {
+    let sent: Record<string, unknown> = {};
+    const client = new FlowHostClient({
+      baseUrl: 'http://127.0.0.1:9',
+      fetchImpl: (async (_input: RequestInfo | URL, init?: RequestInit) => {
+        sent = JSON.parse(String(init?.body));
+        return new Response(JSON.stringify({ status: 'suspended' }), { status: 200 });
+      }) as unknown as typeof fetch,
+    });
+    const files = [{ slot: 'sales', name: 'q4.csv', bytes: 3, sha256: 'sha256:x' }];
+    await client.startRun('run-2', { from_run: 'run-1', approval_token: 'tok', input_files: files });
+    expect(sent).toEqual({ run_id: 'run-2', from_run: 'run-1', approval_token: 'tok', input_files: files });
   });
 
   it('startRun surfaces a run conflict as a non-throwing status/json pair', async () => {

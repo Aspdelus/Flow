@@ -187,10 +187,35 @@ export const HOST_RUN_INPUT_LIMITS = {
 /** File names a run's input files may not have: the host refuses them. */
 const CREDENTIAL_FILE = /^(\.env(\..*)?|id_rsa(\..*)?|.*\.(pem|key|p12|pfx))$/u;
 
+/** A file chosen for a run, in the input slot the plan reads it through (W31). */
+export type HostRunInputChoice = { slot: string; file: File };
+
+/** `task.goal` is the task text in every plan; no slot may take it. */
+const SLOT_PATTERN = /^[a-z0-9](?:[a-z0-9_-]{0,62}[a-z0-9])?$/u;
+
+/** A slot for a file called `name`: its name without the extension, as a
+ * port name (`Q3 Sales.csv` -> `q3_sales`), else `file_<n>`; never one of
+ * `taken`. */
+export function hostDefaultSlot(name: string, taken: readonly string[]): string {
+  const stem = name.includes('.') && !name.startsWith('.') ? name.slice(0, name.lastIndexOf('.')) : name;
+  const base = stem
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/gu, '_')
+    .replace(/^_+|_+$/gu, '')
+    .slice(0, 48)
+    .replace(/_+$/u, '');
+  const usable = (slot: string) => SLOT_PATTERN.test(slot) && slot !== 'goal' && !taken.includes(slot);
+  if (base && usable(base)) return base;
+  for (let index = 1; ; index += 1) {
+    const slot = base && SLOT_PATTERN.test(base) && base !== 'goal' ? `${base}_${index}` : `file_${index}`;
+    if (usable(slot)) return slot;
+  }
+}
+
 /** Why the files chosen for a new run cannot go, or `null`.  The host checks
  * all of it again; this only saves a round of uploads that would fail. */
 export function hostRunInputProblem(
-  files: readonly { name: string; size: number }[],
+  files: readonly { slot: string; name: string; size: number }[],
   locale: FlowWebsiteLocale,
 ): string | null {
   const zh = locale === 'zh';
@@ -198,9 +223,16 @@ export function hostRunInputProblem(
     HOST_RUN_INPUT_LIMITS;
   if (files.length > maxFiles)
     return zh ? `最多 ${maxFiles} 个文件` : `At most ${maxFiles} files`;
-  const names = new Set<string>();
+  const slots = new Set<string>();
   for (const file of files) {
     const name = file.name;
+    if (!SLOT_PATTERN.test(file.slot) || file.slot === 'goal')
+      return zh
+        ? `输入名 ${file.slot || '（空）'} 不可用：只能用小写字母、数字、_ 和 -，以字母或数字开头结尾，最长 64 字，不能叫 goal`
+        : `The input name ${file.slot || '(empty)'} cannot be used: lowercase letters, digits, _ and - only, starting and ending with a letter or digit, at most 64, not goal`;
+    if (slots.has(file.slot))
+      return zh ? `两个文件都用了输入名 ${file.slot}` : `Two files use the input name ${file.slot}`;
+    slots.add(file.slot);
     if (
       !name ||
       [...name].length > maxNameChars ||
@@ -215,9 +247,6 @@ export function hostRunInputProblem(
       return zh
         ? `${name} 看起来是密钥或凭据文件，不会上传`
         : `${name} looks like a key or credential file; it is not uploaded`;
-    if (names.has(name))
-      return zh ? `有两个文件都叫 ${name}` : `Two files are named ${name}`;
-    names.add(name);
     if (file.size > maxFileBytes)
       return zh
         ? `${name} 超过 ${formatHostBytes(maxFileBytes)}`
@@ -261,7 +290,7 @@ export function beginNewRun(
   taskText: string,
   permissionCeiling: string[],
   subplans: HostSubplanMode = 'auto',
-  inputFiles: readonly File[] = [],
+  inputFiles: readonly HostRunInputChoice[] = [],
   onUploaded?: (done: number, total: number) => void,
 ): { runId: string; uploaded: Promise<void>; started: Promise<void> } {
   const trimmed = taskText.trim();
@@ -285,6 +314,16 @@ export function beginNewRun(
       : uploads.then((uploaded) =>
           client.startRun(runId, { ...envelope, input_files: uploaded }),
         );
+  return trackRunStart(runId, uploads, request);
+}
+
+/** `started` for a run begun by {@link beginNewRun} or {@link beginRunAgain}:
+ * kept in {@link pendingRunStarts} until the host answers. */
+function trackRunStart(
+  runId: string,
+  uploads: Promise<unknown>,
+  request: Promise<{ status: number; json: JsonObject }>,
+): { runId: string; uploaded: Promise<void>; started: Promise<void> } {
   const started = request.then(({ status, json }) => {
     if (status < 200 || status >= 300) {
       const message =
@@ -300,46 +339,94 @@ export function beginNewRun(
   return { runId, uploaded: uploads.then(() => undefined), started };
 }
 
+/**
+ * Run the workflow run `fromRun` was approved with again (W31): the files in
+ * `changed` replace those of their slots, every other slot keeps
+ * `fromRun`'s file.  The host takes `fromRun`'s approved plans (no planning)
+ * and the new run waits for its own approval.  Like {@link beginNewRun}.
+ */
+export function beginRunAgain(
+  config: HostModeConfig,
+  fromRun: string,
+  changed: readonly HostRunInputChoice[] = [],
+  onUploaded?: (done: number, total: number) => void,
+): { runId: string; uploaded: Promise<void>; started: Promise<void> } {
+  const client = createHostClient(config);
+  const runId = mintRunId();
+  const uploads = uploadHostRunInputs(client, runId, changed, onUploaded);
+  const request = uploads.then((uploaded) =>
+    client.startRun(runId, {
+      from_run: fromRun,
+      approval_token: mintApprovalToken(),
+      ...(uploaded.length > 0 ? { input_files: uploaded } : {}),
+    }),
+  );
+  return trackRunStart(runId, uploads, request);
+}
+
 /** Upload a new run's input files one at a time (W31), before the run is
  * started; the host's answers go into its envelope.  The first refusal
  * stops it, with the host's reason. */
 async function uploadHostRunInputs(
   client: FlowHostClient,
   runId: string,
-  files: readonly File[],
+  files: readonly HostRunInputChoice[],
   onUploaded?: (done: number, total: number) => void,
 ): Promise<HostRunInputFile[]> {
   const uploaded: HostRunInputFile[] = [];
-  for (const file of files) {
-    uploaded.push(await client.putRunInput(runId, file.name, file));
+  for (const { slot, file } of files) {
+    uploaded.push(await client.putRunInput(runId, slot, file.name, file));
     onUploaded?.(uploaded.length, files.length);
   }
   return uploaded;
 }
 
+/** What the run was started with (W31): see {@link loadHostRunInput}. */
+export type HostRunInput = {
+  taskText: string | null;
+  inputFiles: HostRunInputFile[];
+  /** The run whose approved workflow this one runs again, if it does. */
+  reusedFrom: string | null;
+  /** Whether a person approved this run's plan (it can then run again). */
+  approved: boolean;
+};
+
 /**
  * What the run was started with, from the Flow snapshot's `input`: the task
- * text (what the user asked for, the page title; `null` when none) and the
- * input files given with it (W31).
+ * text (what the user asked for, the page title; `null` when none), the
+ * input files given with it and the run it runs the workflow of (W31), and
+ * whether its plan was approved.
  */
 export async function loadHostRunInput(
   config: HostModeConfig,
-): Promise<{ taskText: string | null; inputFiles: HostRunInputFile[] }> {
+): Promise<HostRunInput> {
   const client = createHostClient(config);
   const snapshot = await client.getRun(config.runId);
   const input = isRecord(snapshot.input) ? snapshot.input : null;
   const text =
     input && typeof input.task_text === 'string' ? input.task_text : '';
   const files = Array.isArray(input?.input_files) ? input.input_files : [];
+  const reuse = isRecord(input?.reuse) ? input.reuse : null;
+  const hooks = isRecord(snapshot.hooks) ? snapshot.hooks : {};
+  const approved = Object.entries(hooks).some(
+    ([id, hook]) =>
+      (id === 'approval' || id.startsWith('approval.')) &&
+      isRecord(hook) &&
+      isRecord(hook.payload) &&
+      hook.payload.approved === true,
+  );
   return {
     taskText: text.trim() ? text.trim() : null,
     inputFiles: files.filter(
       (file): file is HostRunInputFile =>
         isRecord(file) &&
+        typeof file.slot === 'string' &&
         typeof file.name === 'string' &&
         typeof file.bytes === 'number' &&
         typeof file.sha256 === 'string',
     ),
+    reusedFrom: typeof reuse?.from_run === 'string' ? reuse.from_run : null,
+    approved,
   };
 }
 
@@ -362,8 +449,8 @@ export function hostStartWithInputFiles(
   const listed = inputFiles
     .map((file) =>
       zh
-        ? `${file.name}（${formatHostBytes(file.bytes)}）`
-        : `${file.name} (${formatHostBytes(file.bytes)})`,
+        ? `${file.slot} = ${file.name}（${formatHostBytes(file.bytes)}）`
+        : `${file.slot} = ${file.name} (${formatHostBytes(file.bytes)})`,
     )
     .join(zh ? '、' : ', ');
   const line = `${zh ? '输入文件' : 'Input files'}: ${listed}`;
