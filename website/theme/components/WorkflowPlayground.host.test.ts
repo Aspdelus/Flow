@@ -1875,6 +1875,71 @@ describe('WorkflowPlayground host mode: control-flow plan steps', () => {
     expect(saved.plan.execution_order).toEqual(plan.execution_order);
   });
 
+  it('saves a field condition (W28) unchanged: its `when` cases and every input it reads (B121)', () => {
+    const when = (value: number) => ({
+      left: { op: 'field', path: 'inventory.count' },
+      op: 'gt',
+      right: { op: 'literal', value },
+    });
+    const fieldPlan = {
+      ...plan,
+      steps: (plan.steps as Record<string, unknown>[]).map((step) =>
+        step.step_id === 'route'
+          ? {
+              ...step,
+              inputs: ['inventory.count', 'inventory.stock'],
+              cases: [
+                { then: ['tax'], when: when(10) },
+                { then: ['backorder'], when: when(0) },
+              ],
+            }
+          : step,
+      ),
+    };
+    const document = canvasDocumentFromProposalDto({
+      run_id: 'run-when',
+      proposal_digest: 'sha256:when',
+      approval_hook_waiting: true,
+      approval_token: 'tok',
+      proposal: { plan: fieldPlan },
+    });
+    const graph = graphFromHostCanvas(document, 'zh', hostCatalog());
+    const saved = hostCanvasFromGraph(document, graph);
+    expect(hostPlanSignature(saved)).toBe(hostPlanSignature(document));
+    // The card's rule line is the case's own expression.
+    const rule = (id: string) =>
+      graph.nodes.find((node) => node.id === id)?.data.dagNode.data.expression as
+        | { expression?: unknown }
+        | undefined;
+    expect(rule('route')?.expression).toEqual(when(10));
+    expect(rule('route~1')?.expression).toEqual(when(0));
+    // A label typed into a case turns it into a label case.
+    const relabelled = {
+      ...graph,
+      nodes: graph.nodes.map((node) =>
+        node.id === 'route~1'
+          ? {
+              ...node,
+              data: {
+                ...node.data,
+                dagNode: {
+                  ...node.data.dagNode,
+                  data: { ...node.data.dagNode.data, matched_label: 'none' },
+                },
+              },
+            }
+          : node,
+      ),
+    };
+    const cases = (hostCanvasFromGraph(document, relabelled).plan.steps as Record<string, unknown>[]).find(
+      (step) => step.step_id === 'route',
+    )?.cases;
+    expect(cases).toEqual([
+      { then: ['tax'], when: when(10) },
+      { label: 'none', then: ['backorder'] },
+    ]);
+  });
+
   it('paints the decided condition, the waiting gate and, at the end, the skipped steps', () => {
     const waiting = hostRunExecutionFromSnapshot({
       status: 'suspended',

@@ -1202,15 +1202,22 @@ function hostStringItems(value: unknown): string[] {
     : [];
 }
 
-/** A condition step's cases as `{label, then}` (see orchestrator-core `StepKind::Condition`). */
+/** A condition step's cases as `{label, then, when?}` (see orchestrator-core
+ * `StepKind::Condition`): a field case (W28) has a `when` expression and no label. */
 function hostConditionCases(
   step: JsonObject,
-): { label: string; then: string[] }[] {
+): { label: string; then: string[]; when?: JsonObject }[] {
   const cases = Array.isArray(step.cases) ? (step.cases as JsonObject[]) : [];
   return cases.map((item) => ({
     label: typeof item?.label === 'string' ? item.label : '',
     then: hostStringItems(item?.then),
+    ...(isRecord(item?.when) ? { when: item.when as JsonObject } : {}),
   }));
+}
+
+/** True for a condition that decides on fields (W28): its cases carry `when`. */
+function hostIsFieldCondition(step: JsonObject): boolean {
+  return hostConditionCases(step).some((item) => item.when !== undefined);
 }
 
 /** Canvas node ids of one condition step: a `flow.condition` per case, the
@@ -1972,19 +1979,31 @@ function hostPlanProjection(
                 desc: objective,
                 matched_label: cases[caseIndex].label,
                 otherwise_label: hostOtherwiseLabel(locale),
-                // The output the condition routes on, editable in the panel.
-                ...(caseIndex === 0 && hostStringItems(step.inputs)[0]
+                // The output the condition routes on, editable in the panel
+                // (a field condition reads the fields its `when` names).
+                ...(caseIndex === 0 &&
+                !hostIsFieldCondition(step) &&
+                hostStringItems(step.inputs)[0]
                   ? { input: { source: hostStringItems(step.inputs)[0] } }
                   : {}),
-                // What the card's rule line shows: the host matches the routed output to this case's label.
-                ...(hostStringItems(step.inputs)[0]
+                // What the card's rule line shows: a field case's own `when`,
+                // else the host matching the routed output to this case's label.
+                ...(cases[caseIndex].when
                   ? {
-                      expression: hostConditionExpression(
-                        hostStringItems(step.inputs)[0],
-                        cases[caseIndex].label,
+                      expression: createA3SFlowExpression(
+                        cases[caseIndex].when as Parameters<
+                          typeof createA3SFlowExpression
+                        >[0],
                       ),
                     }
-                  : {}),
+                  : hostStringItems(step.inputs)[0]
+                    ? {
+                        expression: hostConditionExpression(
+                          hostStringItems(step.inputs)[0],
+                          cases[caseIndex].label,
+                        ),
+                      }
+                    : {}),
               },
               registry,
             },
@@ -2656,22 +2675,30 @@ export function hostCanvasFromGraph(
       const previous = Array.isArray(step.cases)
         ? (step.cases as JsonObject[])
         : [];
-      step.cases = chain.map((part, index) => ({
-        label: String(
+      const fieldCondition = hostIsFieldCondition(step);
+      step.cases = chain.map((part, index) => {
+        const then = targetsOf(part.id, 'matched', chainIds);
+        const label = String(
           hostNodeConfig(part).matched_label ?? previous[index]?.label ?? '',
-        ),
-        then: targetsOf(part.id, 'matched', chainIds),
-      }));
+        );
+        // A field case (W28) keeps its `when` unless a label was typed in;
+        // its key order is the host's, so an unedited plan saves unchanged.
+        const when = previous[index]?.when;
+        return isRecord(when) && !label.trim() ? { then, when } : { label, then };
+      });
       step.otherwise = targetsOf(
         chain[chain.length - 1].id,
         'otherwise',
         chainIds,
       );
-      const source =
-        hostConditionSource(node) ??
-        hostStringItems(step.inputs)[0] ??
-        upstreamOutputs(node.id)[0];
-      step.inputs = source ? [source] : [];
+      // A field condition reads every field its cases name: its inputs stay.
+      if (!fieldCondition) {
+        const source =
+          hostConditionSource(node) ??
+          hostStringItems(step.inputs)[0] ??
+          upstreamOutputs(node.id)[0];
+        step.inputs = source ? [source] : [];
+      }
     } else if (kind === 'approval' && fresh) {
       // What the reviewer checks: every output of the steps wired into the gate.
       step.inputs = upstreamOutputs(node.id);
