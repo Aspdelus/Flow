@@ -13,6 +13,10 @@ import {
   addHostPlanStep,
   applyCopilotSteps,
   beginNewRun,
+  formatHostBytes,
+  hostRunInputProblem,
+  hostStartWithInputFiles,
+  loadHostRunInput,
   copilotReplyOutcome,
   hostConditionExpression,
   postCopilotRequest,
@@ -1546,6 +1550,102 @@ describe('WorkflowPlayground host mode', () => {
       await Promise.resolve();
       expect(pendingRunStart(runId)).toBeUndefined();
       expect(isRunNotYetCreated(notFound, runId)).toBe(false);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('beginNewRun uploads the input files first, then starts the run listing them (W31)', async () => {
+    const calls: string[] = [];
+    let started: Record<string, unknown> = {};
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      calls.push(`${init?.method} ${url.replace('http://127.0.0.1:9', '')}`);
+      if (init?.method === 'PUT') {
+        const name = decodeURIComponent(url.slice(url.lastIndexOf('/') + 1));
+        return new Response(JSON.stringify({ name, bytes: 3, sha256: `sha256:${name}` }), { status: 200 });
+      }
+      started = JSON.parse(String(init?.body));
+      return new Response(JSON.stringify({ status: 'suspended' }), { status: 200 });
+    });
+    vi.stubGlobal('fetch', fetchImpl);
+    const config = { baseUrl: 'http://127.0.0.1:9', runId: '', tenantId: 't', principalRef: 'p' };
+    try {
+      const progress: string[] = [];
+      const run = beginNewRun(config, 'a task', ['read'], 'auto', [new File(['abc'], 'sales.csv'), new File(['def'], '需求.md')], (done, total) => progress.push(`${done}/${total}`));
+      await run.uploaded;
+      await run.started;
+      expect(calls).toEqual([
+        `PUT /v1/runs/${run.runId}/inputs/sales.csv`,
+        `PUT /v1/runs/${run.runId}/inputs/${encodeURIComponent('需求.md')}`,
+        'POST /v1/runs',
+      ]);
+      expect(progress).toEqual(['1/2', '2/2']);
+      expect(started.input_files).toEqual([
+        { name: 'sales.csv', bytes: 3, sha256: 'sha256:sales.csv' },
+        { name: '需求.md', bytes: 3, sha256: 'sha256:需求.md' },
+      ]);
+      // Without files nothing is uploaded and the envelope has no input_files.
+      calls.length = 0;
+      await beginNewRun(config, 'a task', ['read']).started;
+      expect(calls).toEqual(['POST /v1/runs']);
+      expect('input_files' in started).toBe(false);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('a refused upload starts no run and says why (W31)', async () => {
+    const calls: string[] = [];
+    vi.stubGlobal('fetch', vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      calls.push(String(init?.method));
+      return new Response(JSON.stringify({ error: 'INVALID_INPUT: this host has no per-run workspaces' }), { status: 400 });
+    }));
+    try {
+      const run = beginNewRun({ baseUrl: 'http://127.0.0.1:9', runId: '', tenantId: 't', principalRef: 'p' }, 'a task', ['read'], 'auto', [new File(['x'], 'a.csv')]);
+      await expect(run.uploaded).rejects.toThrow('no per-run workspaces');
+      await expect(run.started).rejects.toThrow('no per-run workspaces');
+      expect(calls).toEqual(['PUT']);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('checks the chosen files against the host limits before uploading (W31)', () => {
+    const file = (name: string, size = 10) => ({ name, size });
+    expect(hostRunInputProblem([file('sales.csv'), file('需求 说明.md')], 'zh')).toBeNull();
+    for (const bad of ['.env', '.hidden', 'a/b.csv', 'server.pem', 'id_rsa', ' x.csv'])
+      expect(hostRunInputProblem([file(bad)], 'en'), bad).not.toBeNull();
+    expect(hostRunInputProblem([file('a.csv'), file('a.csv')], 'en')).toContain('Two files');
+    expect(hostRunInputProblem([file('big.bin', 20 * 1024 * 1024 + 1)], 'zh')).toContain('超过 20 MB');
+    expect(hostRunInputProblem(Array.from({ length: 21 }, (_, index) => file(`f${index}.txt`)), 'zh')).toContain('最多 20');
+    expect(hostRunInputProblem(Array.from({ length: 6 }, (_, index) => file(`f${index}.bin`, 18 * 1024 * 1024)), 'en')).toContain('together');
+    expect([formatHostBytes(512), formatHostBytes(12 * 1024), formatHostBytes(3.4 * 1024 * 1024)]).toEqual(['512 B', '12 KB', '3.4 MB']);
+  });
+
+  it('reads the run input back and lists its files on the start node only (W31)', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () =>
+      new Response(JSON.stringify({
+        status: 'suspended',
+        input: { task_text: ' a task ', input_files: [{ name: 'sales.csv', bytes: 12288, sha256: 'sha256:x' }, { name: 7 }] },
+      }), { status: 200 }),
+    ));
+    try {
+      const read = await loadHostRunInput({ baseUrl: 'http://127.0.0.1:9', runId: 'run-1', tenantId: 't', principalRef: 'p' });
+      expect(read).toEqual({ taskText: 'a task', inputFiles: [{ name: 'sales.csv', bytes: 12288, sha256: 'sha256:x' }] });
+      const plan = {
+        steps: [{ step_id: 'read', agent_id: 'reader', version: '1.0.0', objective: 'read the sales', inputs: ['task.goal'], outputs: ['text'] }],
+        edges: [],
+        execution_order: ['read'],
+      };
+      const graph = graphFromHostCanvas(canvasDocumentFromProposalDto({ run_id: 'run-1', proposal: { plan } }), 'zh', hostCatalog());
+      const shown = hostStartWithInputFiles(graph, read.inputFiles, 'zh');
+      const start = shown.nodes.find((node) => node.id === 'start')!;
+      expect(String(start.data.dagNode.data.desc)).toContain('输入文件: sales.csv（12 KB）');
+      expect(start.data.hostInputFiles).toEqual(read.inputFiles);
+      // Shown only: the plan saved from the graph is unchanged.
+      expect(shown.nodes.filter((node) => node.id !== 'start')).toEqual(graph.nodes.filter((node) => node.id !== 'start'));
+      expect(hostStartWithInputFiles(graph, [], 'zh')).toBe(graph);
     } finally {
       vi.unstubAllGlobals();
     }

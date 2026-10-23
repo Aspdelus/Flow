@@ -53,6 +53,8 @@ export type WorkflowPlaygroundRunListProps = {
     taskText: string,
     permissionCeiling: string[],
     subplans: HostSubplanMode,
+    inputFiles: File[],
+    onUploaded?: (done: number, total: number) => void,
   ) => Promise<void>;
 };
 
@@ -74,6 +76,7 @@ export function WorkflowPlaygroundRunList({
   const [dialogOpen, setDialogOpen] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
+  const [uploadProgress, setUploadProgress] = useState<{ done: number; total: number } | null>(null);
   const title = locale === 'zh' ? '我的任务' : 'My tasks';
   const description =
     locale === 'zh'
@@ -90,11 +93,15 @@ export function WorkflowPlaygroundRunList({
     taskText: string,
     permissionCeiling: string[],
     subplans: HostSubplanMode,
+    inputFiles: File[],
   ) => {
     setSubmitting(true);
     setSubmitError(null);
+    setUploadProgress(inputFiles.length > 0 ? { done: 0, total: inputFiles.length } : null);
     try {
-      await onSubmitNewRun(taskText, permissionCeiling, subplans);
+      await onSubmitNewRun(taskText, permissionCeiling, subplans, inputFiles, (done, total) =>
+        setUploadProgress({ done, total }),
+      );
       setDialogOpen(false);
     } catch (submitError_: unknown) {
       setSubmitError(
@@ -104,6 +111,7 @@ export function WorkflowPlaygroundRunList({
       );
     } finally {
       setSubmitting(false);
+      setUploadProgress(null);
     }
   };
 
@@ -180,9 +188,10 @@ export function WorkflowPlaygroundRunList({
           error={submitError}
           locale={locale}
           onClose={() => setDialogOpen(false)}
-          onSubmit={(taskText, permissionCeiling, subplans) =>
-            void submitNewRun(taskText, permissionCeiling, subplans)
+          onSubmit={(taskText, permissionCeiling, subplans, inputFiles) =>
+            void submitNewRun(taskText, permissionCeiling, subplans, inputFiles)
           }
+          uploadProgress={uploadProgress}
         />
       )}
     </aside>

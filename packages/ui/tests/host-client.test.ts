@@ -162,6 +162,42 @@ describe('FlowHostClient', () => {
     );
   });
 
+  it('uploads a run input file as raw bytes with PUT, its name encoded (W31)', async () => {
+    const content = new Blob(['a,b\n1,2\n']);
+    const fetchImpl = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      // The file itself is the body, never JSON.
+      expect(init?.body).toBe(content);
+      expect((init?.headers as Record<string, string>)['Content-Type']).toBe('application/octet-stream');
+      return new Response(
+        JSON.stringify({ name: '销售 数据.csv', bytes: 8, sha256: 'sha256:ab' }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      );
+    });
+    const client = new FlowHostClient({
+      baseUrl: 'http://127.0.0.1:9',
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    });
+    const file = await client.putRunInput('run-1', '销售 数据.csv', content);
+    expect(file).toEqual({ name: '销售 数据.csv', bytes: 8, sha256: 'sha256:ab' });
+    expect(fetchImpl).toHaveBeenCalledWith(
+      `http://127.0.0.1:9/v1/runs/run-1/inputs/${encodeURIComponent('销售 数据.csv')}`,
+      expect.objectContaining({ method: 'PUT' }),
+    );
+  });
+
+  it('putRunInput throws the host reason when it refuses an upload', async () => {
+    const refusing = (status: number, body: unknown) =>
+      new FlowHostClient({
+        baseUrl: 'http://127.0.0.1:9',
+        fetchImpl: (async () =>
+          new Response(JSON.stringify(body), { status })) as unknown as typeof fetch,
+      });
+    await expect(
+      refusing(400, { error: 'INVALID_INPUT: input file .env looks like a credential file' }).putRunInput('run-1', '.env', new Blob(['x'])),
+    ).rejects.toThrow('looks like a credential file');
+    await expect(refusing(200, { name: 'x' }).putRunInput('run-1', 'x', new Blob(['x']))).rejects.toThrow('malformed');
+  });
+
   it('startRun surfaces a run conflict as a non-throwing status/json pair', async () => {
     const fetchImpl = vi.fn(async () =>
       new Response(

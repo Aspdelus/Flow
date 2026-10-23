@@ -1,8 +1,9 @@
-import { Plus, Sparkle, X } from '@phosphor-icons/react';
+import { Paperclip, Plus, Sparkle, X } from '@phosphor-icons/react';
 import { useEffect, useId, useRef, useState, type FormEvent } from 'react';
 import type { FlowWebsiteLocale } from './flow-node-catalog';
 import { SelectControl } from '@a3s-lab/flow-ui/react';
 import type { HostSubplanMode } from '@a3s-lab/flow-ui';
+import { formatHostBytes, hostRunInputProblem } from './WorkflowPlayground.host';
 
 const PERMISSION_CEILING_PRESETS = ['read', 'read,write'] as const;
 const SUBPLAN_MODES: readonly HostSubplanMode[] = ['auto', 'encouraged', 'forbidden'];
@@ -17,8 +18,17 @@ export type WorkflowPlaygroundNewRunDialogProps = {
     taskText: string,
     permissionCeiling: string[],
     subplans: HostSubplanMode,
+    inputFiles: File[],
   ) => void;
+  /** While the input files are being uploaded (W31). */
+  uploadProgress?: { done: number; total: number } | null;
 };
+
+/** `files` with `added` appended; a file of the same name replaces the earlier one. */
+export function withAddedInputFiles(files: readonly File[], added: readonly File[]): File[] {
+  const names = new Set(added.map((file) => file.name));
+  return [...files.filter((file) => !names.has(file.name)), ...added];
+}
 
 /**
  * "Start over from scratch" -- a genuinely new task, re-shortlisted against
@@ -28,8 +38,8 @@ export type WorkflowPlaygroundNewRunDialogProps = {
  * not a Copilot-panel tab) so the two never get confused with each other.
  *
  * Modal structure/focus-trap pattern copied from
- * WorkflowPlaygroundTriggerDialog.tsx; this form is far simpler (two fields,
- * no dynamic JSON schema), so it doesn't need that file's SchemaField/error
+ * WorkflowPlaygroundTriggerDialog.tsx; this form is far simpler (a few fixed
+ * fields, no dynamic JSON schema), so it doesn't need that file's SchemaField/error
  * map machinery.
  */
 export function WorkflowPlaygroundNewRunDialog({
@@ -38,6 +48,7 @@ export function WorkflowPlaygroundNewRunDialog({
   locale,
   onClose,
   onSubmit,
+  uploadProgress,
 }: WorkflowPlaygroundNewRunDialogProps) {
   const dialogRef = useRef<HTMLElement>(null);
   const previousFocus = useRef<HTMLElement | null>(null);
@@ -48,6 +59,10 @@ export function WorkflowPlaygroundNewRunDialog({
     useState<PermissionCeilingPreset>('read');
   // Whether the AI may split the task into sub-plans (W26), chosen up front.
   const [subplans, setSubplans] = useState<HostSubplanMode>('auto');
+  // Files only this run gets (W31): uploaded before it starts, then in its
+  // workspace under inputs/.
+  const [inputFiles, setInputFiles] = useState<File[]>([]);
+  const inputProblem = hostRunInputProblem(inputFiles, locale);
 
   useEffect(() => {
     previousFocus.current =
@@ -99,8 +114,8 @@ export function WorkflowPlaygroundNewRunDialog({
 
   const submit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    if (busy || !taskText.trim()) return;
-    onSubmit(taskText, permissionCeiling.split(','), subplans);
+    if (busy || !taskText.trim() || inputProblem) return;
+    onSubmit(taskText, permissionCeiling.split(','), subplans, inputFiles);
   };
 
   const title = locale === 'zh' ? '新建规划' : 'New task';
@@ -141,9 +156,23 @@ export function WorkflowPlaygroundNewRunDialog({
           encouraged: 'Ask the AI to plan each part that needs several steps as a sub-plan, approved with the main plan.',
           forbidden: 'One plan for the whole task; a plan or an edit with a sub-plan is refused.',
         };
+  const filesLabel = locale === 'zh' ? '输入文件（可选）' : 'Input files (optional)';
+  const addFilesLabel = locale === 'zh' ? '添加文件' : 'Add files';
+  const filesHint =
+    locale === 'zh'
+      ? '只给这个任务：放进它的工作区 inputs/ 目录，规划时 AI 能看到文件名和文本文件的开头，各步骤可以读取。'
+      : "For this task only: put in its workspace's inputs/ folder; the planner sees the names and the start of text files, and every step can read them.";
+  const removeFileLabel = (name: string) =>
+    locale === 'zh' ? `移除 ${name}` : `Remove ${name}`;
   const cancelLabel = locale === 'zh' ? '取消' : 'Cancel';
   const submitLabel = locale === 'zh' ? '提交' : 'Submit';
-  const submittingLabel = locale === 'zh' ? '提交中…' : 'Submitting…';
+  const submittingLabel = uploadProgress
+    ? locale === 'zh'
+      ? `上传中 ${uploadProgress.done}/${uploadProgress.total}…`
+      : `Uploading ${uploadProgress.done}/${uploadProgress.total}…`
+    : locale === 'zh'
+      ? '提交中…'
+      : 'Submitting…';
   const closeLabel = locale === 'zh' ? '关闭' : 'Close';
 
   return (
@@ -231,6 +260,52 @@ export function WorkflowPlaygroundNewRunDialog({
               {subplanModeHints[subplans]}
             </small>
           </label>
+          <div className="a3s-new-run-dialog__field">
+            <span>{filesLabel}</span>
+            {inputFiles.length > 0 && (
+              <ul className="a3s-new-run-dialog__files" data-testid="new-run-files">
+                {inputFiles.map((file) => (
+                  <li key={file.name}>
+                    <span>{file.name}</span>
+                    <small>{formatHostBytes(file.size)}</small>
+                    <button
+                      aria-label={removeFileLabel(file.name)}
+                      disabled={busy}
+                      onClick={() =>
+                        setInputFiles((current) =>
+                          current.filter((item) => item !== file),
+                        )
+                      }
+                      type="button"
+                    >
+                      <X aria-hidden="true" />
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+            <label className="a3s-new-run-dialog__add-files">
+              <Paperclip aria-hidden="true" />
+              {addFilesLabel}
+              <input
+                data-testid="new-run-file-input"
+                disabled={busy}
+                multiple
+                onChange={(event) => {
+                  const chosen = Array.from(event.currentTarget.files ?? []);
+                  event.currentTarget.value = '';
+                  setInputFiles((current) => withAddedInputFiles(current, chosen));
+                }}
+                type="file"
+              />
+            </label>
+            <small className="a3s-new-run-dialog__hint">{filesHint}</small>
+            {inputProblem && (
+              <p className="a3s-new-run-dialog__error" role="alert">
+                {inputProblem}
+              </p>
+            )}
+          </div>
           {error && (
             <p className="a3s-new-run-dialog__error" role="alert">
               {error}
@@ -247,7 +322,7 @@ export function WorkflowPlaygroundNewRunDialog({
             </button>
             <button
               className="a3s-new-run-dialog__submit"
-              disabled={busy || !taskText.trim()}
+              disabled={busy || !taskText.trim() || Boolean(inputProblem)}
               type="submit"
             >
               <Plus aria-hidden="true" />

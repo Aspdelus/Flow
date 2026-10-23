@@ -121,7 +121,18 @@ export type FlowTaskEnvelope = {
   limit?: number;
   /** Absent means `auto`. */
   subplans?: HostSubplanMode;
+  /** W31: the files uploaded for this run with `putRunInput`, as the host
+   * answered each upload; the start checks and seals them. */
+  input_files?: HostRunInputFile[];
   approval_token: string;
+};
+
+/** One input file of a run (W31), as `PUT /v1/runs/{run_id}/inputs/{name}`
+ * answers it and the run's envelope lists it. */
+export type HostRunInputFile = {
+  name: string;
+  bytes: number;
+  sha256: string;
 };
 
 function trimTrailingSlash(url: string): string {
@@ -686,6 +697,70 @@ export class FlowHostClient {
       }
       throw error;
     }
+  }
+
+  /**
+   * `PUT /v1/runs/{run_id}/inputs/{name}` -- one input file of a run not
+   * started yet (W31), its bytes as the body.  Throws with the host's reason
+   * when it refuses (a bad name, over the limits, a host without per-run
+   * workspaces, a run already started).
+   */
+  async putRunInput(
+    runId: string,
+    name: string,
+    content: Blob,
+  ): Promise<HostRunInputFile> {
+    if (!runId.trim() || !name) {
+      throw new HostClientError('INVALID_INPUT: runId and name are required');
+    }
+    let response: Response;
+    try {
+      response = await this.fetchImpl(
+        this.url(
+          `/v1/runs/${encodeURIComponent(runId)}/inputs/${encodeURIComponent(name)}`,
+        ),
+        {
+          method: 'PUT',
+          headers: {
+            Accept: 'application/json',
+            'Content-Type': 'application/octet-stream',
+          },
+          body: content,
+        },
+      );
+    } catch (error) {
+      throw new HostClientError(
+        `INVALID_INPUT: uploading ${name} failed: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+    const text = await response.text();
+    let json: Record<string, unknown> = {};
+    try {
+      json = text.trim() ? (JSON.parse(text) as Record<string, unknown>) : {};
+    } catch {
+      json = { error: text };
+    }
+    if (!response.ok) {
+      throw new HostClientError(
+        typeof json.error === 'string'
+          ? json.error
+          : `INVALID_INPUT: uploading ${name} returned HTTP ${response.status}`,
+        response.status,
+        json,
+      );
+    }
+    if (
+      typeof json.name !== 'string' ||
+      typeof json.bytes !== 'number' ||
+      typeof json.sha256 !== 'string'
+    ) {
+      throw new HostClientError(
+        `INVALID_INPUT: the host's answer to uploading ${name} is malformed`,
+      );
+    }
+    return { name: json.name, bytes: json.bytes, sha256: json.sha256 };
   }
 
   /**

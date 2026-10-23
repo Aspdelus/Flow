@@ -16,6 +16,7 @@ import {
   type HostComposeProgressFrame,
   type HostGateRequest,
   type HostRecoveryFailure,
+  type HostRunInputFile,
   type HostSubplanMode,
   type JsonObject,
 } from '@a3s-lab/flow-ui';
@@ -124,7 +125,9 @@ import {
   loadHostRunExecution,
   hostNodeDetailText,
   hostPlanScopeRevision,
-  loadHostRunTaskText,
+  loadHostRunInput,
+  hostStartWithInputFiles,
+  formatHostBytes,
   pendingRunStart,
   postCopilotRequest,
   refreshCanvasFromProposalDto,
@@ -276,6 +279,8 @@ function WorkflowPlaygroundSurface({
   // What the user asked for (the run's task_text) -- the page title in host
   // mode, instead of a generic "AI plan" label.
   const [hostTaskText, setHostTaskText] = useState<string | null>(null);
+  // The files the run was started with (W31), shown on its start node.
+  const [hostInputFiles, setHostInputFiles] = useState<HostRunInputFile[]>([]);
   // Latest planning *phase* frame (kind: "phase"); drafts stay in
   // hostProgress so a later phase frame never hides the last draft.
   const [hostPlanningPhase, setHostPlanningPhase] =
@@ -631,14 +636,17 @@ function WorkflowPlaygroundSurface({
   // title stays) on anything else.
   useEffect(() => {
     setHostTaskText(null);
+    setHostInputFiles([]);
     if (!hostMode?.runId) return;
     let cancelled = false;
     let timer: number | undefined;
     let tries = 0;
     const attempt = (): void => {
-      void loadHostRunTaskText(hostMode)
-        .then((text) => {
-          if (!cancelled) setHostTaskText(text);
+      void loadHostRunInput(hostMode)
+        .then(({ taskText, inputFiles }) => {
+          if (cancelled) return;
+          setHostTaskText(taskText);
+          setHostInputFiles(inputFiles);
         })
         .catch(() => {
           if (cancelled || ++tries >= 10) return;
@@ -1483,15 +1491,19 @@ function WorkflowPlaygroundSurface({
   const viewGraph = useMemo(
     () =>
       hostMode
-        ? hostBlockView(
-            graph,
-            new Set(hostCollapsible.filter((id) => !hostOpened.has(id))),
+        ? hostStartWithInputFiles(
+            hostBlockView(
+              graph,
+              new Set(hostCollapsible.filter((id) => !hostOpened.has(id))),
+              locale,
+              catalog.registry,
+              toggleHostContainer,
+            ),
+            hostInputFiles,
             locale,
-            catalog.registry,
-            toggleHostContainer,
           )
         : graph,
-    [catalog.registry, graph, hostCollapsible, hostMode, hostOpened, locale, toggleHostContainer],
+    [catalog.registry, graph, hostCollapsible, hostInputFiles, hostMode, hostOpened, locale, toggleHostContainer],
   );
   shownNodesRef.current = viewGraph.nodes;
   // Opening or collapsing a block re-lays the plan out: keep it all in view.
@@ -1904,18 +1916,24 @@ function WorkflowPlaygroundSurface({
       taskText: string,
       permissionCeiling: string[],
       subplans: HostSubplanMode,
+      inputFiles: File[],
+      onUploaded?: (done: number, total: number) => void,
     ) => {
       if (!hostMode) return;
-      // Navigate as soon as the run id is minted: POST /v1/runs only
+      // Navigate as soon as the input files are up (W31) -- a refused one
+      // stays in the dialog -- without waiting for POST /v1/runs: it only
       // answers once planning is over, and the run page is where planning
       // progress is shown. A start failure surfaces there (see the load
       // effect's pendingRunStart handling), not in this dialog.
-      const { runId } = beginNewRun(
+      const { runId, uploaded } = beginNewRun(
         hostMode,
         taskText,
         permissionCeiling,
         subplans,
+        inputFiles,
+        onUploaded,
       );
+      await uploaded;
       selectHostRun(runId);
     },
     [hostMode, selectHostRun],
@@ -2829,7 +2847,30 @@ function WorkflowPlaygroundSurface({
             onRunNode={(nodeId) => void runNode(nodeId)}
             selectedNode={selectedNode}
             hostStepEditor={
-              hostMode && selectedNode && hostStepEditorKind(selectedNode) ? (
+              hostMode &&
+              selectedNode?.id === 'start' &&
+              !selectedNode.parentId &&
+              hostInputFiles.length > 0 ? (
+                <section
+                  className="flow-playground-host-input-files"
+                  data-testid="host-input-files"
+                >
+                  <h3>{locale === 'zh' ? '输入文件' : 'Input files'}</h3>
+                  <p>
+                    {locale === 'zh'
+                      ? '随任务一起提交，各步骤在工作区的 inputs/ 下读取。'
+                      : "Given with the task; every step reads them under its workspace's inputs/."}
+                  </p>
+                  <ul>
+                    {hostInputFiles.map((file) => (
+                      <li key={file.name}>
+                        <code>inputs/{file.name}</code>
+                        <small>{formatHostBytes(file.bytes)}</small>
+                      </li>
+                    ))}
+                  </ul>
+                </section>
+              ) : hostMode && selectedNode && hostStepEditorKind(selectedNode) ? (
                 <WorkflowPlaygroundHostStepEditor
                   // Its options come from the plan the node is in: the parent
                   // plan's, or its sub-plan's (inside that container).

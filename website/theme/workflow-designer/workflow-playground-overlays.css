@@ -835,6 +835,83 @@
   box-shadow: 0 0 0 3px rgba(18, 100, 255, 0.1);
 }
 
+/* Input files of a new run (W31): the chosen ones, then the picker. */
+.a3s-new-run-dialog__files {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.a3s-new-run-dialog__files li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 6px 5px 10px;
+  border: 1px solid var(--workflow-line);
+  border-radius: 8px;
+  background: var(--workflow-surface-muted);
+  font-size: 12px;
+}
+
+.a3s-new-run-dialog__files li > span {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--workflow-text);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.a3s-new-run-dialog__files small {
+  color: var(--workflow-muted);
+  font-size: 11px;
+}
+
+.a3s-new-run-dialog__files button {
+  display: inline-flex;
+  padding: 3px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--workflow-muted);
+  cursor: pointer;
+}
+
+.a3s-new-run-dialog__files button:hover {
+  background: var(--workflow-line);
+  color: var(--workflow-text);
+}
+
+.a3s-new-run-dialog__add-files {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  align-self: flex-start;
+  gap: 6px;
+  padding: 6px 10px;
+  border: 1px dashed var(--workflow-line);
+  border-radius: 8px;
+  color: var(--workflow-text);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.a3s-new-run-dialog__add-files:hover,
+.a3s-new-run-dialog__add-files:focus-within {
+  border-color: var(--workflow-blue);
+  color: var(--workflow-blue);
+}
+
+.a3s-new-run-dialog__add-files input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+}
+
 .a3s-new-run-dialog__error {
   margin: 0;
   color: var(--workflow-danger, #d64545);

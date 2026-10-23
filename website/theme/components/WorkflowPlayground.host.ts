@@ -9,6 +9,7 @@ import {
   type HostPlanProblem,
   type HostPlanStepNode,
   type HostRecoveryFailure,
+  type HostRunInputFile,
   type HostSubplanMode,
   type JsonObject,
   applyCanvasNodeEdits,
@@ -174,6 +175,70 @@ export async function submitNewRun(
   return runId;
 }
 
+/** Limits on a run's input files (W31), the host's (adapters/flow-host
+ * `run_inputs.rs`): checked here first so the dialog says so at once. */
+export const HOST_RUN_INPUT_LIMITS = {
+  maxFiles: 20,
+  maxFileBytes: 20 * 1024 * 1024,
+  maxTotalBytes: 100 * 1024 * 1024,
+  maxNameChars: 128,
+} as const;
+
+/** File names a run's input files may not have: the host refuses them. */
+const CREDENTIAL_FILE = /^(\.env(\..*)?|id_rsa(\..*)?|.*\.(pem|key|p12|pfx))$/u;
+
+/** Why the files chosen for a new run cannot go, or `null`.  The host checks
+ * all of it again; this only saves a round of uploads that would fail. */
+export function hostRunInputProblem(
+  files: readonly { name: string; size: number }[],
+  locale: FlowWebsiteLocale,
+): string | null {
+  const zh = locale === 'zh';
+  const { maxFiles, maxFileBytes, maxTotalBytes, maxNameChars } =
+    HOST_RUN_INPUT_LIMITS;
+  if (files.length > maxFiles)
+    return zh ? `最多 ${maxFiles} 个文件` : `At most ${maxFiles} files`;
+  const names = new Set<string>();
+  for (const file of files) {
+    const name = file.name;
+    if (
+      !name ||
+      [...name].length > maxNameChars ||
+      name.startsWith('.') ||
+      /[/\\\u0000-\u001f\u007f]/u.test(name) ||
+      name !== name.trim()
+    )
+      return zh
+        ? `文件名 ${name} 不可用（不能以点开头、含路径或控制字符，最长 ${maxNameChars} 字）`
+        : `The name ${name} cannot be used (no leading dot, path or control characters, at most ${maxNameChars} characters)`;
+    if (CREDENTIAL_FILE.test(name))
+      return zh
+        ? `${name} 看起来是密钥或凭据文件，不会上传`
+        : `${name} looks like a key or credential file; it is not uploaded`;
+    if (names.has(name))
+      return zh ? `有两个文件都叫 ${name}` : `Two files are named ${name}`;
+    names.add(name);
+    if (file.size > maxFileBytes)
+      return zh
+        ? `${name} 超过 ${formatHostBytes(maxFileBytes)}`
+        : `${name} is over ${formatHostBytes(maxFileBytes)}`;
+  }
+  const total = files.reduce((sum, file) => sum + file.size, 0);
+  if (total > maxTotalBytes)
+    return zh
+      ? `文件合计超过 ${formatHostBytes(maxTotalBytes)}`
+      : `The files are over ${formatHostBytes(maxTotalBytes)} together`;
+  return null;
+}
+
+/** `12 KB`, `3.4 MB`: a file size for people. */
+export function formatHostBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
+  const mb = bytes / (1024 * 1024);
+  return `${mb < 10 ? mb.toFixed(1) : Math.round(mb)} MB`;
+}
+
 // Start requests still in flight (or that failed), keyed by run id, so the
 // run page a caller navigated to right away can tell "not created yet" from
 // "does not exist" and surface a start failure. Successful starts are
@@ -186,7 +251,9 @@ const pendingRunStarts = new Map<string, Promise<void>>();
  * planning (a real model takes minutes), so a caller that awaited it would
  * sit on a "Submitting..." dialog the whole time and never get to show
  * planning progress. `started` settles when the host answers; it rejects
- * with the host's own error text. Blank task text throws synchronously,
+ * with the host's own error text.  `uploaded` settles once the input files
+ * (W31) are uploaded, before the run is started: a caller waits for it, so a
+ * refused file is shown where it was chosen and no run is begun. Blank task text throws synchronously,
  * before any request.
  */
 export function beginNewRun(
@@ -194,7 +261,9 @@ export function beginNewRun(
   taskText: string,
   permissionCeiling: string[],
   subplans: HostSubplanMode = 'auto',
-): { runId: string; started: Promise<void> } {
+  inputFiles: readonly File[] = [],
+  onUploaded?: (done: number, total: number) => void,
+): { runId: string; uploaded: Promise<void>; started: Promise<void> } {
   const trimmed = taskText.trim();
   if (!trimmed) {
     throw new HostClientError('INVALID_INPUT: task text is required');
@@ -208,7 +277,15 @@ export function beginNewRun(
     ...(subplans === 'auto' ? {} : { subplans }),
     approval_token: mintApprovalToken(),
   };
-  const started = client.startRun(runId, envelope).then(({ status, json }) => {
+  const uploads = uploadHostRunInputs(client, runId, inputFiles, onUploaded);
+  // Without files the start goes out at once, as it always has.
+  const request =
+    inputFiles.length === 0
+      ? client.startRun(runId, envelope)
+      : uploads.then((uploaded) =>
+          client.startRun(runId, { ...envelope, input_files: uploaded }),
+        );
+  const started = request.then(({ status, json }) => {
     if (status < 200 || status >= 300) {
       const message =
         typeof json.error === 'string' ? json.error : `HTTP ${status}`;
@@ -220,23 +297,92 @@ export function beginNewRun(
     () => pendingRunStarts.delete(runId),
     () => {},
   );
-  return { runId, started };
+  return { runId, uploaded: uploads.then(() => undefined), started };
+}
+
+/** Upload a new run's input files one at a time (W31), before the run is
+ * started; the host's answers go into its envelope.  The first refusal
+ * stops it, with the host's reason. */
+async function uploadHostRunInputs(
+  client: FlowHostClient,
+  runId: string,
+  files: readonly File[],
+  onUploaded?: (done: number, total: number) => void,
+): Promise<HostRunInputFile[]> {
+  const uploaded: HostRunInputFile[] = [];
+  for (const file of files) {
+    uploaded.push(await client.putRunInput(runId, file.name, file));
+    onUploaded?.(uploaded.length, files.length);
+  }
+  return uploaded;
 }
 
 /**
- * The task text the run was started with (`input.task_text` on the Flow
- * snapshot) -- what the user actually asked for, used as the page title.
- * `null` when the snapshot has none.
+ * What the run was started with, from the Flow snapshot's `input`: the task
+ * text (what the user asked for, the page title; `null` when none) and the
+ * input files given with it (W31).
  */
-export async function loadHostRunTaskText(
+export async function loadHostRunInput(
   config: HostModeConfig,
-): Promise<string | null> {
+): Promise<{ taskText: string | null; inputFiles: HostRunInputFile[] }> {
   const client = createHostClient(config);
   const snapshot = await client.getRun(config.runId);
   const input = isRecord(snapshot.input) ? snapshot.input : null;
   const text =
     input && typeof input.task_text === 'string' ? input.task_text : '';
-  return text.trim() ? text.trim() : null;
+  const files = Array.isArray(input?.input_files) ? input.input_files : [];
+  return {
+    taskText: text.trim() ? text.trim() : null,
+    inputFiles: files.filter(
+      (file): file is HostRunInputFile =>
+        isRecord(file) &&
+        typeof file.name === 'string' &&
+        typeof file.bytes === 'number' &&
+        typeof file.sha256 === 'string',
+    ),
+  };
+}
+
+/** The task text the run was started with (see {@link loadHostRunInput}). */
+export async function loadHostRunTaskText(
+  config: HostModeConfig,
+): Promise<string | null> {
+  return (await loadHostRunInput(config)).taskText;
+}
+
+/** The start node with the run's input files under its plan label (W31):
+ * shown only, the start node is no plan step and is never saved. */
+export function hostStartWithInputFiles(
+  graph: PlaygroundGraphState,
+  inputFiles: readonly HostRunInputFile[],
+  locale: FlowWebsiteLocale,
+): PlaygroundGraphState {
+  if (inputFiles.length === 0) return graph;
+  const zh = locale === 'zh';
+  const listed = inputFiles
+    .map((file) =>
+      zh
+        ? `${file.name}（${formatHostBytes(file.bytes)}）`
+        : `${file.name} (${formatHostBytes(file.bytes)})`,
+    )
+    .join(zh ? '、' : ', ');
+  const line = `${zh ? '输入文件' : 'Input files'}: ${listed}`;
+  return {
+    ...graph,
+    nodes: graph.nodes.map((node) => {
+      if (node.id !== 'start' || node.parentId) return node;
+      const data = node.data.dagNode.data;
+      const desc = typeof data.desc === 'string' && data.desc ? `${data.desc}\n${line}` : line;
+      return {
+        ...node,
+        data: {
+          ...node.data,
+          hostInputFiles: inputFiles,
+          dagNode: { ...node.data.dagNode, data: { ...data, desc } },
+        },
+      };
+    }),
+  };
 }
 
 /** The in-flight (or failed) start of a run begun by {@link beginNewRun} in

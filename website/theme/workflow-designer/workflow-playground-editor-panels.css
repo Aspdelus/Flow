@@ -1030,3 +1030,53 @@
 .flow-playground-host-step-editor__group:disabled code {
   color: inherit;
 }
+
+/* The run's input files (W31), in the start node's settings. */
+.flow-playground-host-input-files {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--workflow-line);
+}
+
+.flow-playground-host-input-files h3 {
+  margin: 0;
+  color: var(--workflow-text);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.flow-playground-host-input-files p {
+  margin: 0;
+  color: var(--workflow-muted);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.flow-playground-host-input-files ul {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.flow-playground-host-input-files li {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.flow-playground-host-input-files code {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.flow-playground-host-input-files small {
+  flex: none;
+  color: var(--workflow-muted);
+}
