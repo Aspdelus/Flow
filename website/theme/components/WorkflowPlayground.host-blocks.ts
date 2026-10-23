@@ -1,6 +1,10 @@
 import type { A3SFlowDagNodeRegistry, JsonObject } from '@a3s-lab/flow-ui';
 import type { FlowWebsiteLocale } from './flow-node-catalog';
-import { layoutPlaygroundGraphInJavaScript } from './WorkflowPlayground.layout-kernel';
+import {
+  layoutPlaygroundGraphInJavaScript,
+  playgroundNodeVisualHeight,
+  playgroundNodeVisualWidth,
+} from './WorkflowPlayground.layout-kernel';
 import {
   createPlaygroundEdge,
   createPlaygroundNode,
@@ -27,6 +31,11 @@ export const HOST_COLLAPSED_SIZE = { width: 300, height: 140 } as const;
 /** The canvas id of block `name`'s container. */
 export function hostBlockId(name: string): string {
   return `block:${name}`;
+}
+
+/** The canvas id of a block's entry node: where what flows into the block starts. */
+export function hostBlockEntryId(blockId: string): string {
+  return `${blockId}~start`;
 }
 
 /** True for a block container: drawn by the view, never a plan step. */
@@ -177,12 +186,24 @@ export function hostBlockView(
       configuration: {
         title: zh ? `${block} · ${steps.length} 步` : `${block} · ${steps.length} step${steps.length === 1 ? '' : 's'}`,
         desc: objectives.join(zh ? '；' : '; '),
-        start_node_id: `${hostBlockId(block)}~start`,
+        start_node_id: hostBlockEntryId(hostBlockId(block)),
       },
       registry,
     });
     container.data = { ...container.data, hostBlock: block, hostBlockSteps: steps.map((node) => node.id) };
     return { ...container, deletable: false };
+  });
+  // Each block's entry node, like a sub-plan's sub-task: the edges that come
+  // into the block from outside start here, so its first steps are wired.
+  const entries = blocks.map((block) => {
+    const parentId = hostBlockId(block);
+    const entry = createPlaygroundNode(hostBlockEntryId(parentId), 'group-start', { x: 0, y: 0 }, locale, {
+      configuration: { title: zh ? '进入本块' : 'Into this block', desc: '' },
+      parentId,
+      registry,
+    });
+    entry.data = { ...entry.data, hostBlockPart: block };
+    return { ...entry, extent: 'parent' as const, deletable: false, selectable: false };
   });
   const inBlocks = graph.nodes.map((node) => {
     const block = members.get(node.id);
@@ -197,7 +218,7 @@ export function hostBlockView(
     };
   });
   // Parents before children: React Flow needs each parent first.
-  const placed: PlaygroundNode[] = [...containers, ...inBlocks];
+  const placed: PlaygroundNode[] = [...containers, ...entries, ...inBlocks];
   const shut = new Set([...collapsible].filter((id) => collapsed.has(id)));
   const byId = new Map(placed.map((node) => [node.id, node]));
   const hidden = new Set(placed.filter((node) => shownAs(node.id, byId, shut) !== node.id).map((node) => node.id));
@@ -215,25 +236,38 @@ export function hostBlockView(
   // block itself -- as in a Flow group, no edge crosses a container's edge.
   const edges: PlaygroundEdge[] = [];
   const shownPairs = new Set<string>();
+  const viewEdge = (source: string, sourceHandle: string, target: string) => {
+    if (source === target || shownPairs.has(`${source}>${target}`)) return;
+    shownPairs.add(`${source}>${target}`);
+    const made = createPlaygroundEdge({ source, sourceHandle, target, targetHandle: 'in' }, nodes, locale, registry);
+    edges.push({ ...made, id: `view:${source}>${target}`, deletable: false, data: { ...made.data, hostViewEdge: true } });
+  };
   for (const edge of graph.edges) {
-    const [source, target] = lifted(shownAs(edge.source, byId, shut), shownAs(edge.target, byId, shut), byId);
+    const shownTarget = shownAs(edge.target, byId, shut);
+    const [source, target] = lifted(shownAs(edge.source, byId, shut), shownTarget, byId);
     if (source === edge.source && target === edge.target) {
       edges.push(edge);
       continue;
     }
-    if (source === target || shownPairs.has(`${source}>${target}`)) continue;
-    shownPairs.add(`${source}>${target}`);
-    const sourceHandle = source === edge.source ? String(edge.sourceHandle ?? '') : 'done';
-    const made = createPlaygroundEdge({ source, sourceHandle, target, targetHandle: 'in' }, nodes, locale, registry);
-    edges.push({ ...made, id: `view:${source}>${target}`, deletable: false, data: { ...made.data, hostViewEdge: true } });
+    viewEdge(source, source === edge.source ? String(edge.sourceHandle ?? '') : 'done', target);
+    // Inside every open block the edge enters, it goes on from the block's entry.
+    for (let inner = shownTarget; inner !== target; ) {
+      const parent = byId.get(inner)?.parentId;
+      if (!parent) break;
+      if (isHostBlockNode(byId.get(parent)!)) viewEdge(hostBlockEntryId(parent), 'next', inner);
+      inner = parent;
+    }
   }
   const laidOut = layoutPlaygroundGraphInJavaScript({ ...graph, nodes, edges });
   // React Flow keeps a node's measured size only on the node objects it is
-  // given back, and a block container (and a collapsed card's size) exists
-  // only here: without its size it is never measured again, so it gets no
-  // handles and no edge reaches it.
+  // given back, and a block container (and a collapsed card's size) and a
+  // block's entry exist only here: without a size such a node is never
+  // measured again, so it gets no handles and no edge reaches it.
   const sized = laidOut.nodes.map((item) => {
-    if (!collapsible.has(item.id) || item.hidden) return item;
+    if (item.hidden) return item;
+    if (typeof item.data.hostBlockPart === 'string')
+      return { ...item, measured: { width: playgroundNodeVisualWidth(item), height: playgroundNodeVisualHeight(item) } };
+    if (!collapsible.has(item.id)) return item;
     const width = Number(item.style?.width);
     const height = Number(item.style?.height);
     return Number.isFinite(width) && Number.isFinite(height) ? { ...item, measured: { width, height } } : item;

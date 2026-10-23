@@ -13,6 +13,7 @@ import {
 } from './WorkflowPlayground.host';
 import {
   HOST_COLLAPSED_SIZE,
+  hostBlockEntryId,
   hostBlockId,
   hostBlockMembers,
   hostBlockStatus,
@@ -145,11 +146,33 @@ describe('host canvas business blocks (W30)', () => {
     // Inside the open block its own edges are shown; the hidden one's are not.
     const shown = open.edges.filter((edge) => !edge.hidden).map((edge) => `${edge.source}>${edge.target}`);
     expect(shown).toEqual(expect.arrayContaining(['eu-stock>eu-quote', 'eu-quote>eu-tax', `${EU}>${REPORT}`]));
-    // An edge into or out of the open block attaches to the block, not to a step inside it.
+    // An edge into or out of the open block attaches to the block, not to a step inside it,
+    // and goes on inside from the block's entry to the step it reaches.
     const inside = new Set(['eu-stock', 'eu-quote', 'eu-tax']);
     for (const edge of open.edges.filter((item) => !item.hidden))
-      expect(inside.has(edge.source) === inside.has(edge.target) || edge.source === EU || edge.target === EU).toBe(true);
+      expect(
+        inside.has(edge.source) === inside.has(edge.target) ||
+          edge.source === EU ||
+          edge.target === EU ||
+          edge.source === hostBlockEntryId(EU),
+      ).toBe(true);
+    expect(shown).toContain(`${hostBlockEntryId(EU)}>eu-stock`);
+    expect(node(open, hostBlockEntryId(EU))?.parentId).toBe(EU);
+    // Sized like the containers: React Flow never measures a node it rebuilds without one.
+    expect(node(open, hostBlockEntryId(EU))?.measured?.width).toBeGreaterThan(0);
     expect(shown.some((pair) => pair.startsWith('eu-tax>') && !pair.endsWith('>eu-tax'))).toBe(false);
+  });
+
+  it('wires every step of an open block: what comes in from outside starts at its entry', () => {
+    const open = view([]);
+    const shown = open.edges.filter((edge) => !edge.hidden);
+    for (const id of ['eu-stock', 'eu-quote', 'eu-tax', 'us-stock', 'us-quote', 'us-tax', 'report'])
+      expect(shown.some((edge) => edge.target === id), id).toBe(true);
+    // The report reads both markets: one entry edge, not one per market.
+    expect(shown.filter((edge) => edge.target === 'report').map((edge) => edge.source)).toEqual([hostBlockEntryId(REPORT)]);
+    // A collapsed block draws no entry.
+    expect(node(view([EU]), hostBlockEntryId(EU))?.hidden).toBe(true);
+    expect(view([EU]).edges.filter((edge) => !edge.hidden).some((edge) => edge.source === hostBlockEntryId(EU))).toBe(false);
   });
 
   it('is a view only: saving it gives the plan back unchanged, blocks included', () => {
