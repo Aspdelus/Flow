@@ -917,15 +917,30 @@
   font-size: 11px;
 }
 
-/* A run of an approved workflow, waiting for its approval (W31). */
+/* A run of an approved workflow, waiting for its approval (W31): floats
+   under the header like .a3s-workflow-load-error, in the info colour. */
 .a3s-workflow-reused-notice {
+  position: absolute;
+  z-index: 40;
+  top: calc(var(--workflow-header-height) + 14px);
+  left: 50%;
+  max-width: min(720px, calc(100% - 140px));
   margin: 0;
-  padding: 8px 16px;
-  border-bottom: 1px solid var(--workflow-line);
-  background: var(--workflow-surface-muted);
+  padding: 10px 16px;
+  border: 1px solid var(--workflow-line);
+  border-radius: 10px;
+  background: var(--workflow-surface);
+  box-shadow: var(--workflow-shadow-floating);
   color: var(--workflow-text);
-  font-size: 12px;
+  font-size: 13px;
   line-height: 1.5;
+  transform: translateX(-50%);
+}
+
+.a3s-workflow-reused-notice a {
+  color: var(--workflow-blue);
+  font-family: var(--workflow-mono, ui-monospace, monospace);
+  font-size: 12px;
 }
 
 .a3s-new-run-dialog__add-files {
