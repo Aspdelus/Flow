@@ -1,5 +1,6 @@
 import type { A3SFlowDagNodeRegistry, JsonObject } from '@a3s-lab/flow-ui';
 import type { FlowWebsiteLocale } from './flow-node-catalog';
+import { hostWithoutImpliedEdges } from './WorkflowPlayground.host';
 import {
   layoutPlaygroundGraphInJavaScript,
   playgroundNodeVisualHeight,
@@ -258,7 +259,17 @@ export function hostBlockView(
       inner = parent;
     }
   }
-  const laidOut = layoutPlaygroundGraphInJavaScript({ ...graph, nodes, edges });
+  // Lifting can make a lifted edge one a longer path implies (two steps of a
+  // block, one fed straight and one through another step): drop it, as the
+  // plan projection does (B140).  A view edge is never saved.
+  const shown = hostWithoutImpliedEdges(
+    edges,
+    (item) =>
+      item.data?.hostViewEdge === true &&
+      item.sourceHandle !== 'matched' &&
+      item.sourceHandle !== 'otherwise',
+  );
+  const laidOut = layoutPlaygroundGraphInJavaScript({ ...graph, nodes, edges: shown });
   // React Flow keeps a node's measured size only on the node objects it is
   // given back, and a block container (and a collapsed card's size) and a
   // block's entry exist only here: without a size such a node is never
@@ -272,5 +283,5 @@ export function hostBlockView(
     const height = Number(item.style?.height);
     return Number.isFinite(width) && Number.isFinite(height) ? { ...item, measured: { width, height } } : item;
   });
-  return { ...laidOut, nodes: sized, edges };
+  return { ...laidOut, nodes: sized, edges: shown };
 }

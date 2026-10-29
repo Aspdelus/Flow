@@ -626,18 +626,13 @@ describe('WorkflowPlayground host mode', () => {
       expect(incoming(graph, 'persona'), `withDsl=${withDsl}`).toEqual([
         'market',
       ]);
+      // A reference a longer path already implies is not drawn as its own
+      // edge (B140): `copy` reads `market` too, but after `persona`.
       expect(incoming(graph, 'copy'), `withDsl=${withDsl}`).toEqual([
-        'market',
         'persona',
       ]);
-      expect(incoming(graph, 'seo'), `withDsl=${withDsl}`).toEqual([
-        'copy',
-        'persona',
-      ]);
+      expect(incoming(graph, 'seo'), `withDsl=${withDsl}`).toEqual(['copy']);
       expect(incoming(graph, 'integrate'), `withDsl=${withDsl}`).toEqual([
-        'copy',
-        'market',
-        'persona',
         'seo',
       ]);
       // Only the integration step is a sink: nothing else reaches `done`.
@@ -648,6 +643,14 @@ describe('WorkflowPlayground host mode', () => {
     // Saving the untouched canvas keeps the chain without rewriting the plan:
     // the data dependencies stay in `inputs` (no extra `depends_on`), the
     // edges are the host's own data edges and the order is the host's own.
+    for (const withDsl of [true, false]) {
+      const shown = canvasFor(withDsl);
+      expect(
+        hostCanvasFromGraph(shown, graphFromHostCanvas(shown, 'en', catalog))
+          .plan.steps,
+        `withDsl=${withDsl}`,
+      ).toEqual(steps);
+    }
     const canvas = canvasFor(false);
     const saved = hostCanvasFromGraph(
       canvas,
@@ -695,6 +698,86 @@ describe('WorkflowPlayground host mode', () => {
       'seo->integrate:seo_out',
     ]);
   });
+  it('leaves out an edge a longer path implies, keeps a declared one, and saves the plan unchanged (B140)', () => {
+    // The shape of a real sub-plan (run a18a4e9f, `remediate`): later steps
+    // read earlier outputs straight through `inputs`, and every such
+    // reference became its own edge, drawn through the cards in between.
+    const agent = (
+      step_id: string,
+      inputs: string[],
+      depends_on: string[] = [],
+    ) => ({
+      step_id,
+      agent_id: 'frontend-developer',
+      version: '1.0.0',
+      objective: step_id,
+      capabilities: ['read'],
+      inputs,
+      outputs: ['result'],
+      depends_on,
+    });
+    const steps = [
+      agent('draft', ['task.task_text']),
+      {
+        step_id: 'approval',
+        kind: 'approval',
+        objective: 'approve',
+        inputs: ['draft.result'],
+        outputs: [],
+        depends_on: [],
+      },
+      agent('backend_fix', ['draft.result'], ['approval']),
+      agent('frontend_fix', ['draft.result'], ['approval']),
+      {
+        step_id: 'a11y_loop',
+        kind: 'loop',
+        objective: 'review until clean',
+        inputs: ['backend_fix.result', 'frontend_fix.result'],
+        outputs: ['result'],
+        depends_on: ['backend_fix', 'frontend_fix'],
+        body: ['a11y_review', 'a11y_fix', 'a11y_final'],
+        until: 'a11y_final.result',
+        max_rounds: 3,
+      },
+      agent('a11y_review', ['a11y_loop.previous', 'backend_fix.result']),
+      agent('a11y_fix', ['a11y_review.result']),
+      agent('a11y_final', ['a11y_fix.result', 'a11y_review.result']),
+      // `draft` is named in depends_on: that edge is saved from the canvas, so it stays.
+      agent(
+        'postmortem',
+        [
+          'a11y_loop.result',
+          'backend_fix.result',
+          'draft.result',
+          'frontend_fix.result',
+        ],
+        ['a11y_loop', 'draft'],
+      ),
+    ];
+    const canvas = canvasDocumentFromProposalDto({
+      schema_version: 'host.flow-http-proposal.v1',
+      run_id: 'run-b140',
+      proposal_digest: 'sha256:b140',
+      execution_digest: 'deadbeef',
+      approval_hook_waiting: true,
+      approval_token: 'tok',
+      proposal: { plan: { schema_version: 'host.agent-plan.v2', steps } },
+    });
+    const graph = graphFromHostCanvas(canvas, 'en', hostCatalog());
+    const incoming = (id: string) =>
+      graph.edges
+        .filter((edge) => edge.target === id)
+        .map((edge) => edge.source)
+        .sort();
+    expect(incoming('backend_fix')).toEqual(['approval']);
+    expect(incoming('frontend_fix')).toEqual(['approval']);
+    expect(incoming('a11y_final')).toEqual(['a11y_fix']);
+    expect(incoming('postmortem')).toEqual(['a11y_loop', 'draft']);
+    expect(
+      hostCanvasFromGraph(canvas, graph).plan.steps as unknown,
+    ).toEqual(steps);
+  });
+
   it('hostCanvasFromGraph derives depends_on from the canvas edges, including fan-in, not from stale cached step data', () => {
     const catalog = hostCatalog();
     const canvas = canvasDocumentFromProposalDto({
@@ -2275,6 +2358,40 @@ describe('WorkflowPlayground host mode: step timeouts', () => {
     const saved = hostCanvasFromGraph(document, graph);
     expect(JSON.parse(JSON.stringify(saved.plan.steps))).toEqual(plan.steps);
     expect(saved.plan.edges).toEqual(plan.edges);
+  });
+
+  it('keeps the timeout edge even when the fallback also reads the step along a longer path (B140)', () => {
+    // estimate reads inventory's partial stock and a check of it as well.
+    const steps = (plan.steps as Record<string, unknown>[]).flatMap((step) =>
+      step.step_id === 'estimate'
+        ? [
+            {
+              ...step,
+              step_id: 'check',
+              inputs: ['inventory.stock'],
+              outputs: ['verdict'],
+            },
+            {
+              ...step,
+              inputs: ['inventory.stock', 'check.verdict', 'task.order'],
+            },
+          ]
+        : [step],
+    );
+    const document = canvasDocumentFromProposalDto({
+      schema_version: 'host.flow-http-proposal.v1',
+      run_id: 'run-timeout-b140',
+      proposal_digest: 'sha256:t',
+      execution_digest: 'feed',
+      approval_hook_waiting: true,
+      approval_token: 'tok',
+      proposal: { plan: { ...plan, steps } },
+    });
+    const graph = graphFromHostCanvas(document, 'zh', hostCatalog());
+    const fallback = graph.edges.filter(
+      (edge) => edge.source === 'inventory' && edge.target === 'estimate',
+    );
+    expect(fallback.map((edge) => edge.data?.labelOverride)).toEqual(['超时']);
   });
 
   it('shows a step that timed out as timed out, not failed: its fallback ran', () => {

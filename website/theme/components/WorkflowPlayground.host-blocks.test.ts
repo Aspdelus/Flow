@@ -227,6 +227,42 @@ describe('host canvas business blocks (W30)', () => {
     expect(new Set(shut.edges.map((edge) => edge.id)).size).toBe(shut.edges.length);
   });
 
+  it('leaves out a lifted edge a longer path between the cards implies (B140)', () => {
+    const graph = planGraph();
+    // The report also reads straight from the start: lifted, that is start -> 汇总,
+    // which start -> 欧盟市场 -> 汇总 already shows.
+    const direct = { ...graph.edges.find((edge) => edge.source === 'eu-tax' && edge.target === 'report')!, id: 'direct', source: 'start', sourceHandle: 'next' };
+    const shut = hostBlockView({ ...graph, edges: [...graph.edges, direct] }, new Set([EU, US, REPORT]), 'zh', catalog().registry);
+    const wired = (source: string, target: string) => shut.edges.some((edge) => edge.source === source && edge.target === target);
+    expect([wired('start', EU), wired(EU, REPORT), wired('start', REPORT)]).toEqual([true, true, false]);
+  });
+
+  it('leaves the plan’s own edges and a condition’s branch to a card as they are (B140)', () => {
+    const graph = planGraph();
+    // A plan edge inside an open block stays, even with a longer path: it can be selected and deleted.
+    const declared = { ...graph.edges.find((edge) => edge.source === 'eu-quote' && edge.target === 'eu-tax')!, id: 'declared', source: 'eu-stock' };
+    const open = hostBlockView({ ...graph, edges: [...graph.edges, declared] }, new Set([US, REPORT]), 'zh', catalog().registry);
+    expect(open.edges.some((edge) => edge.id === 'declared')).toBe(true);
+    // A branch lifted to a card stays, even when the condition also reaches the card another way.
+    const condition = canvasDocumentFromProposalDto({
+      run_id: 'run-cond-b140',
+      proposal: {
+        plan: {
+          ...fixture.plans[9].plan,
+          steps: (fixture.plans[9].plan.steps as Record<string, unknown>[]).map((step) =>
+            ['tax', 'notify', 'signoff', 'logistics'].includes(String(step.step_id)) ? { ...step, block: 'Pay' } : step,
+          ),
+        },
+      },
+    });
+    const conditionGraph = graphFromHostCanvas(condition, 'en', catalog());
+    // route matches into Pay (tax), route~1 falls through into it (notify), and both also reach it through backorder.
+    const around = { ...conditionGraph.edges.find((edge) => edge.source === 'tax')!, id: 'around', source: 'backorder', target: 'tax' };
+    const shut = hostBlockView({ ...conditionGraph, edges: [...conditionGraph.edges, around] }, new Set([hostBlockId('Pay')]), 'en', catalog().registry);
+    const into = (source: string) => shut.edges.filter((edge) => edge.source === source && edge.target === hostBlockId('Pay')).map((edge) => edge.sourceHandle);
+    expect([into('route'), into('route~1')]).toEqual([['matched'], ['otherwise']]);
+  });
+
   it('lays an open block out after what it reads, not beside the start', () => {
     const open = view([US, REPORT]);
     expect(node(open, EU)!.position.x).toBeGreaterThan(node(open, 'start')!.position.x);

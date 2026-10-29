@@ -1387,6 +1387,79 @@ function planStepUpstream(step: JsonObject, stepIds: Set<string>): string[] {
   return Array.from(upstream).sort();
 }
 
+/**
+ * `edges` without each `removable` edge whose target its source already
+ * reaches along a longer path (B140).  A plan step reading the outputs of
+ * several earlier steps gets an edge from each, and drawn in a layout of
+ * columns the ones skipping a column run straight through the cards between
+ * and on top of each other; the longer path already shows the order.
+ */
+export function hostWithoutImpliedEdges<
+  T extends { source: string; target: string },
+>(edges: readonly T[], removable: (edge: T) => boolean): T[] {
+  const outgoing = new Map<string, T[]>();
+  for (const item of edges) {
+    const list = outgoing.get(item.source);
+    if (list) list.push(item);
+    else outgoing.set(item.source, [item]);
+  }
+  // Whether `edge.target` is reachable from `edge.source` by a path of two or more edges.
+  const longerPath = (edge: T) => {
+    const seen = new Set([edge.source]);
+    const pending = [edge.source];
+    while (pending.length > 0) {
+      const current = pending.pop() as string;
+      for (const item of outgoing.get(current) ?? []) {
+        if (current === edge.source && item.target === edge.target) continue;
+        if (item.target === edge.target) return true;
+        if (seen.has(item.target)) continue;
+        seen.add(item.target);
+        pending.push(item.target);
+      }
+    }
+    return false;
+  };
+  return edges.filter((item) => !removable(item) || !longerPath(item));
+}
+
+/** Whether the canvas may leave out the edge `source -> step` when a longer
+ * path implies it: only an edge `step`'s `inputs` imply, never one it names
+ * in `depends_on`, which saving takes from the canvas edges
+ * (hostCanvasFromGraph). */
+function hostEdgeImpliedByInputs(
+  step: JsonObject | undefined,
+  source: string,
+): boolean {
+  if (!step || hostStringItems(step.depends_on).includes(source)) return false;
+  return hostStringItems(step.inputs).some(
+    (reference) =>
+      reference.lastIndexOf('.') > 0 &&
+      reference.slice(0, reference.lastIndexOf('.')) === source,
+  );
+}
+
+/** `edges` between `nodes` without the plain step-to-step edges a longer
+ * path implies (see hostWithoutImpliedEdges); a timeout fallback's labelled
+ * edge always stays.  (A condition's branch is never implied: a condition
+ * has no outputs for `inputs` to name.) */
+function hostWithoutImpliedStepEdges(
+  nodes: readonly PlaygroundNode[],
+  edges: readonly PlaygroundEdge[],
+): PlaygroundEdge[] {
+  const stepOf = new Map(
+    nodes.map((node) => [
+      node.id,
+      node.data.hostPlanStep as JsonObject | undefined,
+    ]),
+  );
+  return hostWithoutImpliedEdges(
+    edges,
+    (item) =>
+      typeof item.data?.labelOverride !== 'string' &&
+      hostEdgeImpliedByInputs(stepOf.get(item.target), item.source),
+  );
+}
+
 /** Order-independent `step_id -> sorted upstream steps` signature for a set
  * of AgentPlan steps (see [[planStepUpstream]]), comparable with
  * [[dslGraphDependencySignature]]. */
@@ -2054,7 +2127,11 @@ export function graphFromHostCanvas(
       const dslPlanSteps = fromDsl.nodes.filter(
         (node) => node.data?.hostPlanStep,
       ).length;
-      if (dslPlanSteps > planSteps.length) return fromDsl;
+      const shown = {
+        ...fromDsl,
+        edges: hostWithoutImpliedStepEdges(fromDsl.nodes, fromDsl.edges),
+      };
+      if (dslPlanSteps > planSteps.length) return shown;
       // Equal step counts don't rule out an unsaved structural edit -- e.g.
       // Copilot or a hand-drawn edit can turn a linear chain into a fan-out/
       // fan-in with the same number of steps. Only trust the (possibly
@@ -2066,7 +2143,7 @@ export function graphFromHostCanvas(
         dslGraphDependencySignature(fromDsl) ===
           planStepsDependencySignature(planSteps)
       ) {
-        return fromDsl;
+        return shown;
       }
     }
   } catch {
@@ -2503,7 +2580,7 @@ function hostPlanProjection(
       ),
     );
   }
-  return { nodes, edges };
+  return { nodes, edges: hostWithoutImpliedStepEdges(nodes, edges) };
 }
 
 function objectiveFromNode(node: PlaygroundNode, fallback: unknown): unknown {
