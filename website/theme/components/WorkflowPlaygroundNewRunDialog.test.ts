@@ -32,6 +32,14 @@ describe('WorkflowPlaygroundNewRunDialog', () => {
     expect(render('en')).toContain('Let the AI decide');
   });
 
+  it('offers an optional first-run text separate from the planning task (W31)', () => {
+    const markup = render('zh');
+    expect(markup).toContain('首次运行输入（可选）');
+    expect(markup).toContain('data-testid="new-run-input-text"');
+    expect(markup).toContain('留空就把任务描述作为本次输入');
+    expect(render('en')).toContain('First run input (optional)');
+  });
+
   it('offers input files for this run only, and shows the upload going (W31)', () => {
     const markup = render('zh');
     expect(markup).toMatch(/data-testid="new-run-file-input"[^>]*multiple|multiple[^>]*data-testid="new-run-file-input"/);

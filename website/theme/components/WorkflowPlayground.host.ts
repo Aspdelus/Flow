@@ -282,8 +282,9 @@ const pendingRunStarts = new Map<string, Promise<void>>();
  * planning progress. `started` settles when the host answers; it rejects
  * with the host's own error text.  `uploaded` settles once the input files
  * (W31) are uploaded, before the run is started: a caller waits for it, so a
- * refused file is shown where it was chosen and no run is begun. Blank task text throws synchronously,
- * before any request.
+ * refused file is shown where it was chosen and no run is begun.  `inputText`
+ * is this run's optional text; blank means the task description.  Blank task
+ * text throws synchronously, before any request.
  */
 export function beginNewRun(
   config: HostModeConfig,
@@ -292,6 +293,7 @@ export function beginNewRun(
   subplans: HostSubplanMode = 'auto',
   inputFiles: readonly HostRunInputChoice[] = [],
   onUploaded?: (done: number, total: number) => void,
+  inputText?: string,
 ): { runId: string; uploaded: Promise<void>; started: Promise<void> } {
   const trimmed = taskText.trim();
   if (!trimmed) {
@@ -302,6 +304,7 @@ export function beginNewRun(
   const envelope: FlowTaskEnvelope = {
     task_text: trimmed,
     permission_ceiling: permissionCeiling,
+    ...(inputText?.trim() ? { input_text: inputText.trim() } : {}),
     // `auto` is the host's default, so it is not sent.
     ...(subplans === 'auto' ? {} : { subplans }),
     approval_token: mintApprovalToken(),
@@ -340,7 +343,8 @@ function trackRunStart(
 }
 
 /**
- * Run the workflow run `fromRun` was approved with again (W31): the files in
+ * Run the workflow run `fromRun` was approved with again (W31): `inputText`
+ * is the new run's text (undefined keeps the template's), and the files in
  * `changed` replace those of their slots, every other slot keeps
  * `fromRun`'s file.  The host takes `fromRun`'s approved plans (no planning)
  * and the new run waits for its own approval.  Like {@link beginNewRun}.
@@ -350,6 +354,7 @@ export function beginRunAgain(
   fromRun: string,
   changed: readonly HostRunInputChoice[] = [],
   onUploaded?: (done: number, total: number) => void,
+  inputText?: string,
 ): { runId: string; uploaded: Promise<void>; started: Promise<void> } {
   const client = createHostClient(config);
   const runId = mintRunId();
@@ -359,6 +364,9 @@ export function beginRunAgain(
       from_run: fromRun,
       approval_token: mintApprovalToken(),
       ...(uploaded.length > 0 ? { input_files: uploaded } : {}),
+      // Undefined keeps the template's input (the old API); an empty string
+      // deliberately restores the original planning task as the run input.
+      ...(inputText === undefined ? {} : { input_text: inputText.trim() }),
     }),
   );
   return trackRunStart(runId, uploads, request);
@@ -384,6 +392,8 @@ async function uploadHostRunInputs(
 /** What the run was started with (W31): see {@link loadHostRunInput}. */
 export type HostRunInput = {
   taskText: string | null;
+  /** This run's own text input; null means it reads `taskText` (W31). */
+  inputText: string | null;
   inputFiles: HostRunInputFile[];
   /** The run whose approved workflow this one runs again, if it does. */
   reusedFrom: string | null;
@@ -405,6 +415,8 @@ export async function loadHostRunInput(
   const input = isRecord(snapshot.input) ? snapshot.input : null;
   const text =
     input && typeof input.task_text === 'string' ? input.task_text : '';
+  const ownText =
+    input && typeof input.input_text === 'string' ? input.input_text.trim() : '';
   const files = Array.isArray(input?.input_files) ? input.input_files : [];
   const reuse = isRecord(input?.reuse) ? input.reuse : null;
   const hooks = isRecord(snapshot.hooks) ? snapshot.hooks : {};
@@ -417,6 +429,7 @@ export async function loadHostRunInput(
   );
   return {
     taskText: text.trim() ? text.trim() : null,
+    inputText: ownText || null,
     inputFiles: files.filter(
       (file): file is HostRunInputFile =>
         isRecord(file) &&
@@ -437,14 +450,16 @@ export async function loadHostRunTaskText(
   return (await loadHostRunInput(config)).taskText;
 }
 
-/** The start node with the run's input files under its plan label (W31):
- * shown only, the start node is no plan step and is never saved. */
+/** The start node with this run's text and input files under its plan label
+ * (W31): shown only, the start node is no plan step and is never saved. */
 export function hostStartWithInputFiles(
   graph: PlaygroundGraphState,
   inputFiles: readonly HostRunInputFile[],
   locale: FlowWebsiteLocale,
+  inputText?: string | null,
 ): PlaygroundGraphState {
-  if (inputFiles.length === 0) return graph;
+  const text = inputText?.trim() ?? '';
+  if (inputFiles.length === 0 && !text) return graph;
   const zh = locale === 'zh';
   const listed = inputFiles
     .map((file) =>
@@ -453,18 +468,24 @@ export function hostStartWithInputFiles(
         : `${file.slot} = ${file.name} (${formatHostBytes(file.bytes)})`,
     )
     .join(zh ? '、' : ', ');
-  const line = `${zh ? '输入文件' : 'Input files'}: ${listed}`;
+  const lines = [
+    // The card gets a prefix only; the start panel keeps the complete text.
+    ...(text ? [`${zh ? '本次输入' : 'Run input'}: ${text.length > 280 ? `${text.slice(0, 280)}…` : text}`] : []),
+    ...(listed ? [`${zh ? '输入文件' : 'Input files'}: ${listed}`] : []),
+  ];
+  const addition = lines.join('\n');
   return {
     ...graph,
     nodes: graph.nodes.map((node) => {
       if (node.id !== 'start' || node.parentId) return node;
       const data = node.data.dagNode.data;
-      const desc = typeof data.desc === 'string' && data.desc ? `${data.desc}\n${line}` : line;
+      const desc = typeof data.desc === 'string' && data.desc ? `${data.desc}\n${addition}` : addition;
       return {
         ...node,
         data: {
           ...node.data,
           hostInputFiles: inputFiles,
+          ...(text ? { hostInputText: text } : {}),
           dagNode: { ...node.data.dagNode, data: { ...data, desc } },
         },
       };

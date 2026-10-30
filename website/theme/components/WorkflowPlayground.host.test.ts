@@ -1666,7 +1666,7 @@ describe('WorkflowPlayground host mode', () => {
     const { calls, bodies } = fakeUploads();
     try {
       const progress: string[] = [];
-      const run = beginNewRun(w31Config, 'a task', ['read'], 'auto', [choice('sales', 'q3.csv'), choice('brief', '需求.md')], (done, total) => progress.push(`${done}/${total}`));
+      const run = beginNewRun(w31Config, 'a task', ['read'], 'auto', [choice('sales', 'q3.csv'), choice('brief', '需求.md')], (done, total) => progress.push(`${done}/${total}`), 'first policy');
       await run.uploaded;
       await run.started;
       expect(calls).toEqual([
@@ -1675,6 +1675,7 @@ describe('WorkflowPlayground host mode', () => {
         'POST /v1/runs',
       ]);
       expect(progress).toEqual(['1/2', '2/2']);
+      expect(bodies[0].input_text).toBe('first policy');
       expect(bodies[0].input_files).toEqual([
         { slot: 'sales', name: 'q3.csv', bytes: 3, sha256: 'sha256:sales' },
         { slot: 'brief', name: '需求.md', bytes: 3, sha256: 'sha256:brief' },
@@ -1684,6 +1685,9 @@ describe('WorkflowPlayground host mode', () => {
       await beginNewRun(w31Config, 'a task', ['read']).started;
       expect(calls).toEqual(['POST /v1/runs']);
       expect('input_files' in bodies[1]).toBe(false);
+      expect('input_text' in bodies[1]).toBe(false);
+      await beginNewRun(w31Config, 'a task', ['read'], 'auto', [], undefined, '   ').started;
+      expect('input_text' in bodies[2]).toBe(false);
     } finally {
       vi.unstubAllGlobals();
     }
@@ -1692,21 +1696,26 @@ describe('WorkflowPlayground host mode', () => {
   it('beginRunAgain uploads only the changed slots and starts from the approved run (W31)', async () => {
     const { calls, bodies } = fakeUploads();
     try {
-      const run = beginRunAgain(w31Config, 'run-template', [choice('sales', 'q4.csv')]);
+      const run = beginRunAgain(w31Config, 'run-template', [choice('sales', 'q4.csv')], undefined, 'second policy');
       await run.started;
       expect(calls).toEqual([`PUT /v1/runs/${run.runId}/inputs/sales?name=q4.csv`, 'POST /v1/runs']);
       expect(bodies[0]).toMatchObject({
         run_id: run.runId,
         from_run: 'run-template',
         input_files: [{ slot: 'sales', name: 'q4.csv', bytes: 3, sha256: 'sha256:sales' }],
+        input_text: 'second policy',
       });
-      expect(Object.keys(bodies[0]).sort()).toEqual(['approval_token', 'from_run', 'input_files', 'run_id']);
+      expect(Object.keys(bodies[0]).sort()).toEqual(['approval_token', 'from_run', 'input_files', 'input_text', 'run_id']);
       expect(pendingRunStart(run.runId)).toBeUndefined();
       // Every slot kept: no upload, no input_files.
       calls.length = 0;
       await beginRunAgain(w31Config, 'run-template').started;
       expect(calls).toEqual(['POST /v1/runs']);
       expect('input_files' in bodies[1]).toBe(false);
+      expect('input_text' in bodies[1]).toBe(false);
+      // Clearing the text is explicit: the host restores the planning task.
+      await beginRunAgain(w31Config, 'run-template', [], undefined, '').started;
+      expect(bodies[2].input_text).toBe('');
     } finally {
       vi.unstubAllGlobals();
     }
@@ -1759,6 +1768,7 @@ describe('WorkflowPlayground host mode', () => {
         status: 'completed',
         input: {
           task_text: ' a task ',
+          input_text: ' this run’s policy text ',
           input_files: [{ slot: 'sales', name: 'q3.csv', bytes: 12288, sha256: 'sha256:x' }, { name: 7 }, { name: 'no-slot.csv', bytes: 1, sha256: 's' }],
           reuse: { from_run: 'run-0', proposal: {} },
         },
@@ -1769,6 +1779,7 @@ describe('WorkflowPlayground host mode', () => {
       const read = await loadHostRunInput({ baseUrl: 'http://127.0.0.1:9', runId: 'run-1', tenantId: 't', principalRef: 'p' });
       expect(read).toEqual({
         taskText: 'a task',
+        inputText: 'this run’s policy text',
         inputFiles: [{ slot: 'sales', name: 'q3.csv', bytes: 12288, sha256: 'sha256:x' }],
         reusedFrom: 'run-0',
         approved: true,
@@ -1779,9 +1790,15 @@ describe('WorkflowPlayground host mode', () => {
         execution_order: ['read'],
       };
       const graph = graphFromHostCanvas(canvasDocumentFromProposalDto({ run_id: 'run-1', proposal: { plan } }), 'zh', hostCatalog());
-      const shown = hostStartWithInputFiles(graph, read.inputFiles, 'zh');
+      const shown = hostStartWithInputFiles(graph, read.inputFiles, 'zh', read.inputText);
       const start = shown.nodes.find((node) => node.id === 'start')!;
+      expect(String(start.data.dagNode.data.desc)).toContain('本次输入: this run’s policy text');
       expect(String(start.data.dagNode.data.desc)).toContain('输入文件: sales = q3.csv（12 KB）');
+      expect(start.data.hostInputText).toBe('this run’s policy text');
+      const long = 'x'.repeat(300);
+      const longStart = hostStartWithInputFiles(graph, [], 'zh', long).nodes.find((node) => node.id === 'start')!;
+      expect(String(longStart.data.dagNode.data.desc)).toContain(`${'x'.repeat(280)}…`);
+      expect(longStart.data.hostInputText).toBe(long);
       expect(start.data.hostInputFiles).toEqual(read.inputFiles);
       // Shown only: the plan saved from the graph is unchanged.
       expect(shown.nodes.filter((node) => node.id !== 'start')).toEqual(graph.nodes.filter((node) => node.id !== 'start'));

@@ -570,7 +570,7 @@ export function WorkflowPlaygroundHeader({
             type="button"
           >
             <ArrowsClockwise aria-hidden="true" />
-            <span>{locale === 'zh' ? '换文件再跑' : 'Run again'}</span>
+            <span>{locale === 'zh' ? '换输入再跑' : 'Run again'}</span>
           </button>
         ) : null}
         {hostMode && onHostSave ? (

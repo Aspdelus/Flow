@@ -114,6 +114,9 @@ export type HostSubplanMode = 'auto' | 'encouraged' | 'forbidden';
 
 export type FlowTaskEnvelope = {
   task_text: string;
+  /** W31: this run's text input; absent means `task_text`.  Changing it on a
+   * rerun does not change the approved plan or its digests. */
+  input_text?: string;
   permission_ceiling: string[];
   required_capabilities?: string[];
   forbidden_capabilities?: string[];

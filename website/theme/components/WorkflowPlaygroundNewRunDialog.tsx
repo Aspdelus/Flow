@@ -24,6 +24,7 @@ export type WorkflowPlaygroundNewRunDialogProps = {
     permissionCeiling: string[],
     subplans: HostSubplanMode,
     inputFiles: HostRunInputChoice[],
+    inputText: string,
   ) => void;
   /** While the input files are being uploaded (W31). */
   uploadProgress?: { done: number; total: number } | null;
@@ -69,6 +70,8 @@ export function WorkflowPlaygroundNewRunDialog({
   const titleId = useId();
   const descriptionId = useId();
   const [taskText, setTaskText] = useState('');
+  // W31: the first run's data, separate from the reusable planning task.
+  const [inputText, setInputText] = useState('');
   const [permissionCeiling, setPermissionCeiling] =
     useState<PermissionCeilingPreset>('read');
   // Whether the AI may split the task into sub-plans (W26), chosen up front.
@@ -132,7 +135,7 @@ export function WorkflowPlaygroundNewRunDialog({
   const submit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (busy || !taskText.trim() || inputProblem) return;
-    onSubmit(taskText, permissionCeiling.split(','), subplans, inputFiles);
+    onSubmit(taskText, permissionCeiling.split(','), subplans, inputFiles, inputText);
   };
 
   const title = locale === 'zh' ? '新建规划' : 'New task';
@@ -145,6 +148,15 @@ export function WorkflowPlaygroundNewRunDialog({
     locale === 'zh'
       ? '例如：撰写一份中美日韩 AI 发展对比调研报告'
       : 'e.g. write a comparative survey of AI development across the US, China, Japan, and Korea';
+  const inputLabel = locale === 'zh' ? '首次运行输入（可选）' : 'First run input (optional)';
+  const inputHint =
+    locale === 'zh'
+      ? '工作流要处理的内容。留空就把任务描述作为本次输入；以后可用另一段文字再跑同一份流程，不重新规划。'
+      : 'The content for this workflow to process. Blank uses the task description; later you can run the same plan again with different text.';
+  const inputPlaceholder =
+    locale === 'zh'
+      ? '例如：粘贴要比较的两份政策或文本'
+      : 'e.g. paste the two policies or texts to compare';
   const ceilingLabel = locale === 'zh' ? '权限上限' : 'Permission ceiling';
   const ceilingReadOnly = locale === 'zh' ? '只读' : 'Read-only';
   const ceilingReadWrite = locale === 'zh' ? '读写' : 'Read + write';
@@ -177,7 +189,7 @@ export function WorkflowPlaygroundNewRunDialog({
   const addFilesLabel = locale === 'zh' ? '添加文件' : 'Add files';
   const filesHint =
     locale === 'zh'
-      ? '每个文件有一个输入名（可改）：工作流按输入名读文件，以后"换文件再跑"时同一个输入名换上新文件，工作流不变。文件放进这个任务工作区的 inputs/，AI 规划时能看到文件名和文本文件的开头。'
+      ? '每个文件有一个输入名（可改）：工作流按输入名读文件，以后"换输入再跑"时同一个输入名换上新文件，工作流不变。文件放进这个任务工作区的 inputs/，AI 规划时能看到文件名和文本文件的开头。'
       : 'Each file has an input name (editable): the workflow reads files by it, so running it again later puts a new file under the same name and keeps the workflow. Files go to this task\'s inputs/ folder; the planner sees their names and the start of text files.';
   const slotLabel = (name: string) =>
     locale === 'zh' ? `${name} 的输入名` : `Input name of ${name}`;
@@ -243,6 +255,18 @@ export function WorkflowPlaygroundNewRunDialog({
               rows={4}
               value={taskText}
             />
+          </label>
+          <label className="a3s-new-run-dialog__field">
+            <span>{inputLabel}</span>
+            <textarea
+              data-testid="new-run-input-text"
+              disabled={busy}
+              onChange={(event) => setInputText(event.currentTarget.value)}
+              placeholder={inputPlaceholder}
+              rows={4}
+              value={inputText}
+            />
+            <small className="a3s-new-run-dialog__hint">{inputHint}</small>
           </label>
           <label className="a3s-new-run-dialog__field">
             <span>{ceilingLabel}</span>

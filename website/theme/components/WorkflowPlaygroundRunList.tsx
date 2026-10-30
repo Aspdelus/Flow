@@ -55,6 +55,7 @@ export type WorkflowPlaygroundRunListProps = {
     subplans: HostSubplanMode,
     inputFiles: HostRunInputChoice[],
     onUploaded?: (done: number, total: number) => void,
+    inputText?: string,
   ) => Promise<void>;
 };
 
@@ -94,13 +95,19 @@ export function WorkflowPlaygroundRunList({
     permissionCeiling: string[],
     subplans: HostSubplanMode,
     inputFiles: HostRunInputChoice[],
+    inputText: string,
   ) => {
     setSubmitting(true);
     setSubmitError(null);
     setUploadProgress(inputFiles.length > 0 ? { done: 0, total: inputFiles.length } : null);
     try {
-      await onSubmitNewRun(taskText, permissionCeiling, subplans, inputFiles, (done, total) =>
-        setUploadProgress({ done, total }),
+      await onSubmitNewRun(
+        taskText,
+        permissionCeiling,
+        subplans,
+        inputFiles,
+        (done, total) => setUploadProgress({ done, total }),
+        inputText,
       );
       setDialogOpen(false);
     } catch (submitError_: unknown) {
@@ -188,8 +195,8 @@ export function WorkflowPlaygroundRunList({
           error={submitError}
           locale={locale}
           onClose={() => setDialogOpen(false)}
-          onSubmit={(taskText, permissionCeiling, subplans, inputFiles) =>
-            void submitNewRun(taskText, permissionCeiling, subplans, inputFiles)
+          onSubmit={(taskText, permissionCeiling, subplans, inputFiles, inputText) =>
+            void submitNewRun(taskText, permissionCeiling, subplans, inputFiles, inputText)
           }
           uploadProgress={uploadProgress}
         />

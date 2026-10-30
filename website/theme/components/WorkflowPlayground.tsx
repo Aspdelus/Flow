@@ -282,6 +282,8 @@ function WorkflowPlaygroundSurface({
   // What the user asked for (the run's task_text) -- the page title in host
   // mode, instead of a generic "AI plan" label.
   const [hostTaskText, setHostTaskText] = useState<string | null>(null);
+  // W31: this run's own text; null means it reads the planning task.
+  const [hostInputText, setHostInputText] = useState<string | null>(null);
   // The files the run was started with (W31), shown on its start node.
   const [hostInputFiles, setHostInputFiles] = useState<HostRunInputFile[]>([]);
   // W31: the run whose approved workflow this run runs again, and whether
@@ -647,6 +649,7 @@ function WorkflowPlaygroundSurface({
   // title stays) on anything else.
   useEffect(() => {
     setHostTaskText(null);
+    setHostInputText(null);
     setHostInputFiles([]);
     setHostReusedFrom(null);
     setHostRunApproved(false);
@@ -656,9 +659,10 @@ function WorkflowPlaygroundSurface({
     let tries = 0;
     const attempt = (): void => {
       void loadHostRunInput(hostMode)
-        .then(({ taskText, inputFiles, reusedFrom, approved }) => {
+        .then(({ taskText, inputText, inputFiles, reusedFrom, approved }) => {
           if (cancelled) return;
           setHostTaskText(taskText);
+          setHostInputText(inputText);
           setHostInputFiles(inputFiles);
           setHostReusedFrom(reusedFrom);
           setHostRunApproved(approved);
@@ -1518,9 +1522,10 @@ function WorkflowPlaygroundSurface({
             ),
             hostInputFiles,
             locale,
+            hostInputText,
           )
         : graph,
-    [catalog.registry, graph, hostCollapsible, hostInputFiles, hostMode, hostOpened, locale, toggleHostContainer],
+    [catalog.registry, graph, hostCollapsible, hostInputFiles, hostInputText, hostMode, hostOpened, locale, toggleHostContainer],
   );
   shownNodesRef.current = viewGraph.nodes;
   // Opening or collapsing a block re-lays the plan out: keep it all in view.
@@ -1928,18 +1933,22 @@ function WorkflowPlaygroundSurface({
   // WorkflowPlaygroundNewRunDialog's doc comment). Navigates to the new
   // run's URL on success, mirroring selectHostRun exactly; throws on
   // failure so the dialog can show the error and stay open.
-  // W31: the workflow this run was approved with, run again with new files
-  // in some of its input slots.  Like a new task, the page moves to the new
-  // run as soon as the files are up; it waits there for approval.
+  // W31: the workflow this run was approved with, run again with new text
+  // and new files in some of its input slots.  Like a new task, the page
+  // moves to the new run as soon as the files are up; it waits for approval.
   const submitRunAgainOnHost = useCallback(
-    async (changed: HostRunInputChoice[]) => {
+    async (changed: HostRunInputChoice[], inputText: string) => {
       if (!hostMode?.runId) return;
       setRunAgainBusy(true);
       setRunAgainError(null);
       setRunAgainProgress(changed.length > 0 ? { done: 0, total: changed.length } : null);
       try {
-        const { runId, uploaded } = beginRunAgain(hostMode, hostMode.runId, changed, (done, total) =>
-          setRunAgainProgress({ done, total }),
+        const { runId, uploaded } = beginRunAgain(
+          hostMode,
+          hostMode.runId,
+          changed,
+          (done, total) => setRunAgainProgress({ done, total }),
+          inputText,
         );
         await uploaded;
         setRunAgainOpen(false);
@@ -1961,6 +1970,7 @@ function WorkflowPlaygroundSurface({
       subplans: HostSubplanMode,
       inputFiles: HostRunInputChoice[],
       onUploaded?: (done: number, total: number) => void,
+      inputText?: string,
     ) => {
       if (!hostMode) return;
       // Navigate as soon as the input files are up (W31) -- a refused one
@@ -1975,6 +1985,7 @@ function WorkflowPlaygroundSurface({
         subplans,
         inputFiles,
         onUploaded,
+        inputText,
       );
       await uploaded;
       selectHostRun(runId);
@@ -2589,8 +2600,8 @@ function WorkflowPlaygroundSurface({
             {hostReusedFrom}
           </a>
           {locale === 'zh'
-            ? ' 批准的完全相同（没有重新规划），只换了输入文件。确认后点"批准"开始。'
-            : ' was approved with (not planned anew); only the input files differ. Approve to start.'}
+            ? ' 批准的完全相同（没有重新规划），只换了本次输入。确认后点"批准"开始。'
+            : ' was approved with (not planned anew); only this run\'s text or input files differ. Approve to start.'}
         </p>
       ) : null}
       <noscript>
@@ -2920,27 +2931,42 @@ function WorkflowPlaygroundSurface({
               hostMode &&
               selectedNode?.id === 'start' &&
               !selectedNode.parentId &&
-              hostInputFiles.length > 0 ? (
-                <section
-                  className="flow-playground-host-input-files"
-                  data-testid="host-input-files"
-                >
-                  <h3>{locale === 'zh' ? '输入文件' : 'Input files'}</h3>
-                  <p>
-                    {locale === 'zh'
-                      ? '工作流按输入名读文件（task.<输入名>）；"换文件再跑"时同一个输入名换上新文件。'
-                      : 'The workflow reads each file by its input name (task.<name>); running it again puts a new file under the same name.'}
-                  </p>
-                  <ul>
-                    {hostInputFiles.map((file) => (
-                      <li key={file.slot}>
-                        <code>task.{file.slot}</code>
-                        <span>{file.name}</span>
-                        <small>{formatHostBytes(file.bytes)}</small>
-                      </li>
-                    ))}
-                  </ul>
-                </section>
+              (hostInputText || hostInputFiles.length > 0) ? (
+                <>
+                  {hostInputText ? (
+                    <section data-testid="host-input-text">
+                      <h3>{locale === 'zh' ? '本次输入' : 'Run input'}</h3>
+                      <p>
+                        {locale === 'zh'
+                          ? '这次运行里，task.task_text 等任务入口读取的文字。'
+                          : 'The text task ports such as task.task_text read in this run.'}
+                      </p>
+                      <textarea aria-label={locale === 'zh' ? '本次输入' : 'Run input'} readOnly rows={5} value={hostInputText} />
+                    </section>
+                  ) : null}
+                  {hostInputFiles.length > 0 ? (
+                    <section
+                      className="flow-playground-host-input-files"
+                      data-testid="host-input-files"
+                    >
+                      <h3>{locale === 'zh' ? '输入文件' : 'Input files'}</h3>
+                      <p>
+                        {locale === 'zh'
+                          ? '工作流按输入名读文件（task.<输入名>）；"换输入再跑"时同一个输入名换上新文件。'
+                          : 'The workflow reads each file by its input name (task.<name>); running it again puts a new file under the same name.'}
+                      </p>
+                      <ul>
+                        {hostInputFiles.map((file) => (
+                          <li key={file.slot}>
+                            <code>task.{file.slot}</code>
+                            <span>{file.name}</span>
+                            <small>{formatHostBytes(file.bytes)}</small>
+                          </li>
+                        ))}
+                      </ul>
+                    </section>
+                  ) : null}
+                </>
               ) : hostMode && selectedNode && hostStepEditorKind(selectedNode) ? (
                 <WorkflowPlaygroundHostStepEditor
                   // Its options come from the plan the node is in: the parent
@@ -3080,9 +3106,10 @@ function WorkflowPlaygroundSurface({
           busy={runAgainBusy}
           error={runAgainError}
           inputFiles={hostInputFiles}
+          inputText={hostInputText ?? hostTaskText ?? ''}
           locale={locale}
           onClose={() => setRunAgainOpen(false)}
-          onSubmit={(changed) => void submitRunAgainOnHost(changed)}
+          onSubmit={(changed, inputText) => void submitRunAgainOnHost(changed, inputText)}
           uploadProgress={runAgainProgress}
         />
       )}

@@ -12,25 +12,28 @@ export type WorkflowPlaygroundRunAgainDialogProps = {
   busy: boolean;
   error: string | null;
   locale: FlowWebsiteLocale;
+  /** The run's current effective text: its own input, else the planning task. */
+  inputText: string;
   /** The run's input files, by slot: what the workflow reads. */
   inputFiles: readonly HostRunInputFile[];
   onClose: () => void;
-  /** The slots given a new file; the others keep this run's. */
-  onSubmit: (changed: HostRunInputChoice[]) => void;
+  /** The new run's text and the slots given a new file; others keep this run's. */
+  onSubmit: (changed: HostRunInputChoice[], inputText: string) => void;
   uploadProgress?: { done: number; total: number } | null;
 };
 
 /**
- * "Run again with other files" (W31): the workflow this run was approved
+ * "Run again with other input" (W31): the workflow this run was approved
  * with runs again as a new run -- same plan, its human edits and sub-plans
- * included, no planning -- with a new file in any of its input slots.  The
- * new run waits for its own approval.  Same modal shell and styles as
- * WorkflowPlaygroundNewRunDialog.
+ * included, no planning -- with new text and a new file in any of its input
+ * slots.  The new run waits for its own approval.  Same modal shell and
+ * styles as WorkflowPlaygroundNewRunDialog.
  */
 export function WorkflowPlaygroundRunAgainDialog({
   busy,
   error,
   locale,
+  inputText: currentInputText,
   inputFiles,
   onClose,
   onSubmit,
@@ -39,6 +42,7 @@ export function WorkflowPlaygroundRunAgainDialog({
   const dialogRef = useRef<HTMLElement>(null);
   const titleId = useId();
   const descriptionId = useId();
+  const [inputText, setInputText] = useState(currentInputText);
   const [replaced, setReplaced] = useState<Record<string, File>>({});
   const changed: HostRunInputChoice[] = inputFiles
     .filter((kept) => replaced[kept.slot])
@@ -72,13 +76,13 @@ export function WorkflowPlaygroundRunAgainDialog({
   const submit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (busy || problem) return;
-    onSubmit(changed);
+    onSubmit(changed, inputText);
   };
 
-  const title = zh ? '换文件再跑' : 'Run again with other files';
+  const title = zh ? '换输入再跑' : 'Run again with other input';
   const description = zh
-    ? '用这次批准过的工作流再跑一次（同一份计划，含人工修改和子计划，不重新规划）。给要换的输入选新文件，其余沿用这次的文件。新运行会停在审批，点"批准"后开始。'
-    : 'Run the workflow this run was approved with again (the same plan, human edits and sub-plans included, not planned anew). Choose a new file for the inputs to change; the others keep this run\'s files. The new run waits for your approval.';
+    ? '用这次批准过的工作流再跑一次（同一份计划，含人工修改和子计划，不重新规划）。输入另一段文字，或给要换的输入选新文件；没换的沿用这次的内容。新运行会停在审批，点"批准"后开始。'
+    : 'Run the workflow this run was approved with again (the same plan, human edits and sub-plans included, not planned anew). Enter other text or replace any input files; everything unchanged keeps this run\'s value. The new run waits for your approval.';
   const submitLabel = uploadProgress
     ? zh
       ? `上传中 ${uploadProgress.done}/${uploadProgress.total}…`
@@ -129,13 +133,28 @@ export function WorkflowPlaygroundRunAgainDialog({
           {description}
         </p>
         <form onSubmit={submit} noValidate>
+          <label className="a3s-new-run-dialog__field">
+            <span>{zh ? '本次运行输入' : 'Input for this run'}</span>
+            <textarea
+              data-testid="run-again-input-text"
+              disabled={busy}
+              onChange={(event) => setInputText(event.currentTarget.value)}
+              rows={6}
+              value={inputText}
+            />
+            <small className="a3s-new-run-dialog__hint">
+              {zh
+                ? '计划里 task.task_text 等任务入口会读到这段文字。清空则改用最初的任务描述。'
+                : 'Task ports such as task.task_text read this text. Clear it to use the original task description.'}
+            </small>
+          </label>
           <div className="a3s-new-run-dialog__field">
             <span>{zh ? '输入文件' : 'Input files'}</span>
             {inputFiles.length === 0 ? (
               <small className="a3s-new-run-dialog__hint">
                 {zh
-                  ? '这个工作流没有输入文件，会原样再跑一次。'
-                  : 'This workflow has no input files; it runs again as it is.'}
+                  ? '这个工作流没有输入文件，只换上面的文字也可以再跑。'
+                  : 'This workflow has no input files; you can run it again with only the text above changed.'}
               </small>
             ) : (
               <ul className="a3s-new-run-dialog__files" data-testid="run-again-slots">
