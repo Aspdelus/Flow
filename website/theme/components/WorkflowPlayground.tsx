@@ -97,9 +97,11 @@ import {
   graphFromHostCanvas,
   EMPTY_HOST_DRAFT,
   hostDraftCanvas,
+  hostDisplayOnlySaveMessage,
   mergeHostDraftStep,
   type HostDraftQueue,
   hostCanvasFromGraph,
+  hostCanvasWithDisplayName,
   hostRewireOtherwise,
   hostStepEditorKind,
   hostUnsavedNodes,
@@ -1432,6 +1434,23 @@ function WorkflowPlaygroundSurface({
 
   const updateSelectedNode = useCallback(
     (dagNode: A3SFlowWorkflowDagNode) => {
+      const previous = graph.nodes.find((node) => node.id === dagNode.id);
+      if (
+        hostMode &&
+        previous?.data.hostPlanStep &&
+        previous.data.dagNode.data.title !== dagNode.data.title
+      ) {
+        // A title edit is a display alias, never an objective or agent edit.
+        setHostCanvas((current) =>
+          current
+            ? hostCanvasWithDisplayName(
+                current,
+                dagNode.id,
+                String(dagNode.data.title ?? ''),
+              )
+            : current,
+        );
+      }
       commit((current) => ({
         ...current,
         nodes: current.nodes.map((node) =>
@@ -1444,7 +1463,7 @@ function WorkflowPlaygroundSurface({
         ),
       }));
     },
-    [commit],
+    [commit, graph, hostMode],
   );
 
   const deleteSelection = useCallback(() => {
@@ -1724,6 +1743,7 @@ function WorkflowPlaygroundSurface({
       const {
         parent: nextCanvas,
         parentChanged,
+        displayNamesChanged,
         replansSubplans,
         subplanEdits,
         refusal,
@@ -1771,9 +1791,11 @@ function WorkflowPlaygroundSurface({
         messages.push(label);
       }
       let refreshed: HostCanvasDocument | null = null;
-      if (parentChanged || subplanEdits.length === 0) {
+      if (parentChanged || displayNamesChanged || subplanEdits.length === 0) {
         const result = await client.saveCanvas(nextCanvas, editRevision);
         const outcome = hostSaveOutcome(result);
+        const aliasMessage = hostDisplayOnlySaveMessage(result, locale);
+        if (aliasMessage) outcome.message = aliasMessage;
         const proposal = result.json.proposal;
         refreshed =
           proposal && typeof proposal === 'object'

@@ -58,6 +58,20 @@ describe('host canvas inject helpers', () => {
     });
   });
 
+  it('carries display aliases beside, never inside, the edited AgentPlan', () => {
+    const canvas = canvasDocumentFromProposalDto({
+      ...dto,
+      display_names: { 'step-001': 'Readable step', ignored: 4 },
+    });
+    expect(canvas.display_names).toEqual({ 'step-001': 'Readable step' });
+    const body = planEditBodyFromCanvas(canvas, 3);
+    expect(body.display_names).toEqual({ 'step-001': 'Readable step' });
+    expect(body.edited_plan).not.toHaveProperty('display_names');
+    expect(body.edited_plan).toEqual(dto.proposal.plan);
+    expect(canvasDocumentFromProposalDto(dto).display_names).toBeUndefined();
+    expect(hostSaveOutcome({ status: 200, json: { decision: { status: 'UNCHANGED', display_names_changed: true } } }).displayNamesChanged).toBe(true);
+  });
+
   it('applies node edits to the plan, not the DSL', () => {
     const canvas = canvasDocumentFromProposalDto(dto);
     const extra = {
@@ -454,13 +468,13 @@ describe('host edit revisions and save outcomes', () => {
 
   it('tells a saved edit from a refused one and from an error', () => {
     const saved = hostSaveOutcome({ status: 200, json: { decision: { status: 'REVALIDATED' } } });
-    expect(saved).toEqual({ saved: true, recorded: true, message: 'REVALIDATED' });
+    expect(saved).toEqual({ saved: true, recorded: true, displayNamesChanged: false, message: 'REVALIDATED' });
     const refused = hostSaveOutcome({ status: 400, json: { decision: { status: 'REJECTED', message: 'step b: unknown agent' } } });
-    expect(refused).toEqual({ saved: false, recorded: true, message: 'REJECTED: step b: unknown agent' });
+    expect(refused).toEqual({ saved: false, recorded: true, displayNamesChanged: false, message: 'REJECTED: step b: unknown agent' });
     // A 2xx that is not a save status is not saved either.
     expect(hostSaveOutcome({ status: 200, json: { decision: { status: 'STALE' } } }).saved).toBe(false);
     const conflict = hostSaveOutcome({ status: 409, json: { error: 'CONFLICT: edit_revision 2 was already saved with a different plan' } });
-    expect(conflict).toEqual({ saved: false, recorded: false, message: 'CONFLICT: edit_revision 2 was already saved with a different plan' });
+    expect(conflict).toEqual({ saved: false, recorded: false, displayNamesChanged: false, message: 'CONFLICT: edit_revision 2 was already saved with a different plan' });
     expect(hostSaveOutcome({ status: 502, json: {} }).message).toBe('host returned HTTP 502');
   });
 });
@@ -524,6 +538,8 @@ describe('host canvas sub-plans (W26)', () => {
     expect(subplanCanvasDocument(parent, 'apac')).toBeNull();
     expect(canvasForView(dto, 'us').subplan).toBeUndefined();
     expect(canvasForView(dto, 'eu').subplan).toBe('eu');
+    const withNames = canvasDocumentFromProposalDto({ ...dto, display_names: { 'eu/audit': 'Audit EU' } });
+    expect(subplanCanvasDocument(withNames, 'eu')?.display_names).toEqual({ 'eu/audit': 'Audit EU' });
   });
 
   it("binds the approval to the parent proposal and the bundle from any of the run's canvases", () => {

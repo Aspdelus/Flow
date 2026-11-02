@@ -105,6 +105,9 @@ export type HostCanvasDocument = {
     path: string;
     body_schema: typeof PLAN_EDIT_SCHEMA;
   };
+  /** Run-local display aliases by step id (`sub-plan/step` inside a sub-plan).
+   * View metadata only, never part of AgentPlan or its digests. */
+  display_names?: Record<string, string>;
   /** The plan's sub-plans; absent when it has none. */
   subplans?: HostSubplanView[];
   /** What one approval of a plan with sub-plans binds (parent + each sub-proposal). */
@@ -282,6 +285,8 @@ export type HostSaveOutcome = {
   saved: boolean;
   /** The host evaluated and recorded it under its revision, saved or not. */
   recorded: boolean;
+  /** Only the run-local display aliases changed; execution stayed UNCHANGED. */
+  displayNamesChanged: boolean;
   message: string;
 };
 
@@ -294,6 +299,7 @@ export function hostSaveOutcome(result: { status: number; json: JsonObject }): H
   return {
     saved: result.status >= 200 && result.status < 300 && status !== undefined && SAVED_EDIT_STATUSES.has(status),
     recorded: status !== undefined,
+    displayNamesChanged: decision?.display_names_changed === true,
     message: status
       ? `${status}${detail}`
       : typeof result.json.error === 'string'
@@ -385,6 +391,15 @@ export function canvasDocumentFromProposalDto(
       path: `/v1/runs/${runId}/plan-edits`,
       body_schema: PLAN_EDIT_SCHEMA,
     },
+    ...(isObject(dto.display_names)
+      ? {
+          display_names: Object.fromEntries(
+            Object.entries(dto.display_names).filter(
+              (entry): entry is [string, string] => typeof entry[1] === 'string',
+            ),
+          ),
+        }
+      : {}),
     ...(Array.isArray(dto.subplans)
       ? {
           subplans: dto.subplans.filter(isObject).map(subplanView),
@@ -431,6 +446,7 @@ export function subplanCanvasDocument(
     last_edit_revision: view.last_edit_revision,
     approval_hook_waiting: parent.approval.hook_waiting,
     approval_token: parent.approval.token,
+    ...(parent.display_names ? { display_names: parent.display_names } : {}),
   });
   return {
     ...canvas,
@@ -659,6 +675,7 @@ export function planEditBodyFromCanvas(
     source: 'flow',
     edit_revision: editRevision,
     edited_plan: plan,
+    ...(canvas.display_names !== undefined ? { display_names: canvas.display_names } : {}),
   };
 }
 

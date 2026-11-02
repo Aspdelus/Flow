@@ -1910,6 +1910,7 @@ export function hostWorkingCanvas(
 export function hostPlanSignature(canvas: HostCanvasDocument): string {
   return JSON.stringify({
     parent: canvas.plan.steps,
+    displayNames: canvas.display_names ?? {},
     subplans: Object.fromEntries(
       (canvas.subplans ?? []).map((view) => [
         view.step_id,
@@ -1932,12 +1933,27 @@ export function hostSignatureSubplanSteps(
   return steps === undefined ? null : JSON.stringify(steps);
 }
 
+/** A save that changed only run-local aliases gets a precise message; a
+ * structural edit with aliases must keep its normal REVALIDATED message. */
+export function hostDisplayOnlySaveMessage(
+  result: { json: JsonObject },
+  locale: FlowWebsiteLocale,
+): string | null {
+  const decision = result.json.decision as JsonObject | undefined;
+  if (decision?.status !== 'UNCHANGED' || decision.display_names_changed !== true) return null;
+  return locale === 'zh'
+    ? '显示名称已保存，执行计划未变'
+    : 'Display names saved; execution plan unchanged';
+}
+
 /** What a save of the canvas sends, worked out before anything is sent. */
 export type HostSavePlan = {
   /** The parent plan as the canvas has it. */
   parent: HostCanvasDocument;
   /** It differs from what the host has (else only sub-plans are saved). */
   parentChanged: boolean;
+  /** Only run-local aliases changed; the execution plan may be UNCHANGED. */
+  displayNamesChanged: boolean;
   /** A sub-plan step's sub-task changed, was added or dropped: the host plans those again. */
   replansSubplans: boolean;
   /** Each sub-plan whose own steps were edited, as its edit (under its next revision). */
@@ -1965,7 +1981,7 @@ export function hostSavePlan(
 ): HostSavePlan {
   const parent = hostCanvasFromGraph(canvas, graph);
   const saved = savedSignature
-    ? (JSON.parse(savedSignature) as { parent?: unknown })
+    ? (JSON.parse(savedSignature) as { parent?: unknown; displayNames?: Record<string, string> })
     : null;
   const savedSteps =
     saved && 'parent' in saved ? saved.parent : canvas.plan.steps;
@@ -2000,6 +2016,9 @@ export function hostSavePlan(
     parent,
     parentChanged:
       JSON.stringify(parent.plan.steps) !== JSON.stringify(savedSteps),
+    displayNamesChanged:
+      JSON.stringify(parent.display_names ?? {}) !==
+      JSON.stringify(saved?.displayNames ?? {}),
     replansSubplans:
       after.length !== before.size || after.some((task) => !before.has(task)),
     subplanEdits,
@@ -2128,6 +2147,45 @@ export function hostDraftCanvas(
   });
 }
 
+/** Apply run-local aliases to plan-step nodes only.  Start/done and scope
+ * helper nodes keep their system names; no plan field is touched. */
+export function hostWithDisplayNames(
+  graph: PlaygroundGraphState,
+  names: Readonly<Record<string, string>> | undefined,
+): PlaygroundGraphState {
+  if (!names || Object.keys(names).length === 0) return graph;
+  return {
+    ...graph,
+    nodes: graph.nodes.map((node) => {
+      if (!node.data.hostPlanStep) return node;
+      const title = names[node.id]?.trim();
+      if (!title) return node;
+      const data = node.data.dagNode.data;
+      return {
+        ...node,
+        data: {
+          ...node.data,
+          dagNode: { ...node.data.dagNode, data: { ...data, title } },
+        },
+      };
+    }),
+  };
+}
+
+/** Change one step's display alias without changing its plan.  Blank clears
+ * it; the UI caps at the host's 80-character limit. */
+export function hostCanvasWithDisplayName(
+  canvas: HostCanvasDocument,
+  stepId: string,
+  title: string,
+): HostCanvasDocument {
+  const displayNames = { ...(canvas.display_names ?? {}) };
+  const alias = Array.from(title.trim()).slice(0, 80).join('');
+  if (alias) displayNames[stepId] = alias;
+  else delete displayNames[stepId];
+  return { ...canvas, display_names: displayNames };
+}
+
 export function graphFromHostCanvas(
   canvas: HostCanvasDocument,
   locale: FlowWebsiteLocale,
@@ -2148,10 +2206,13 @@ export function graphFromHostCanvas(
       const dslPlanSteps = fromDsl.nodes.filter(
         (node) => node.data?.hostPlanStep,
       ).length;
-      const shown = {
-        ...fromDsl,
-        edges: hostWithoutImpliedStepEdges(fromDsl.nodes, fromDsl.edges),
-      };
+      const shown = hostWithDisplayNames(
+        {
+          ...fromDsl,
+          edges: hostWithoutImpliedStepEdges(fromDsl.nodes, fromDsl.edges),
+        },
+        canvas.display_names,
+      );
       if (dslPlanSteps > planSteps.length) return shown;
       // Equal step counts don't rule out an unsaved structural edit -- e.g.
       // Copilot or a hand-drawn edit can turn a linear chain into a fan-out/
@@ -2171,7 +2232,10 @@ export function graphFromHostCanvas(
     // Fall back to plan projection when DSL types are incomplete.
   }
   const { nodes, edges } = hostPlanProjection(canvas, locale, catalog);
-  return layoutPlaygroundGraphInJavaScript({ nodes, edges, annotations: [] });
+  return hostWithDisplayNames(
+    layoutPlaygroundGraphInJavaScript({ nodes, edges, annotations: [] }),
+    canvas.display_names,
+  );
 }
 
 /** The plan's steps as canvas nodes and edges (before layout), from `start`

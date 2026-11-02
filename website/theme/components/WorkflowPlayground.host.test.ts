@@ -31,9 +31,12 @@ import {
   hostCopilotSubplan,
   EMPTY_HOST_DRAFT,
   hostDraftCanvas,
+  hostDisplayOnlySaveMessage,
   mergeHostDraftStep,
   hostPlanScopeRevision,
   hostCanvasFromGraph,
+  hostCanvasWithDisplayName,
+  hostWithDisplayNames,
   hostApprovalInputs,
   hostConditionChain,
   hostConditionInput,
@@ -776,6 +779,53 @@ describe('WorkflowPlayground host mode', () => {
     expect(
       hostCanvasFromGraph(canvas, graph).plan.steps as unknown,
     ).toEqual(steps);
+  });
+
+  it('saves display aliases separately from the plan and draws them on either projection', () => {
+    const steps = [{
+      step_id: 's1', agent_id: 'frontend-developer', version: '1.0.0',
+      objective: 'do the work', capabilities: ['read'], inputs: ['task.goal'],
+      outputs: ['result'], depends_on: [],
+    }];
+    const documentFor = (withDsl: boolean) => canvasDocumentFromProposalDto({
+      schema_version: 'host.flow-http-proposal.v1',
+      run_id: 'run-alias', proposal_digest: 'sha256:alias', execution_digest: 'deadbeef',
+      approval_hook_waiting: true, approval_token: 'tok',
+      proposal: { plan: { schema_version: 'host.agent-plan.v2', steps } },
+      ...(withDsl ? { flow_dsl: { workflow: { graph: {
+        nodes: [
+          { id: 'start', data: { type: 'flow.start' } },
+          { id: 's1', data: { type: HOST_PREVIEW_TYPE, agent_id: 'frontend-developer' } },
+          { id: 'done', data: { type: 'flow.complete' } },
+        ],
+        edges: [{ source: 'start', target: 's1' }, { source: 's1', target: 'done' }],
+      } } } } : {}),
+    });
+    for (const withDsl of [false, true]) {
+      const original = documentFor(withDsl);
+      const aliased = hostCanvasWithDisplayName(original, 's1', '  Readable step  ');
+      expect(aliased.plan).toEqual(original.plan);
+      const graph = graphFromHostCanvas(aliased, 'en', hostCatalog());
+      expect(graph.nodes.find((node) => node.id === 's1')?.data.dagNode.data.title).toBe('Readable step');
+      expect(graph.nodes.find((node) => node.id === 'start')?.data.dagNode.data.title).toBe('Start');
+      const systemGraph = graphFromHostCanvas(hostCanvasWithDisplayName(aliased, 'start', 'Custom start'), 'en', hostCatalog());
+      expect(systemGraph.nodes.find((node) => node.id === 'start')?.data.dagNode.data.title).toBe('Start');
+      const save = hostSavePlan(aliased, graph, hostPlanSignature(original), 'en');
+      expect([save.parentChanged, save.displayNamesChanged]).toEqual([false, true]);
+      expect(save.parent.display_names).toEqual({ s1: 'Readable step' });
+      const cleared = hostCanvasWithDisplayName(aliased, 's1', '');
+      const clearSave = hostSavePlan(cleared, graph, hostPlanSignature(aliased), 'en');
+      expect(clearSave.displayNamesChanged).toBe(true);
+    }
+    const original = documentFor(false);
+    const long = hostCanvasWithDisplayName(original, 's1', ` ${'x'.repeat(90)} `);
+    expect(long.display_names?.s1).toHaveLength(80);
+    expect(hostCanvasWithDisplayName(long, 's1', '  ').display_names).toEqual({});
+    const plain = graphFromHostCanvas(original, 'en', hostCatalog());
+    expect(hostWithDisplayNames(plain, undefined)).toBe(plain);
+    expect(hostDisplayOnlySaveMessage({ json: { decision: { status: 'UNCHANGED', display_names_changed: true } } }, 'zh')).toBe('显示名称已保存，执行计划未变');
+    expect(hostDisplayOnlySaveMessage({ json: { decision: { status: 'REVALIDATED', display_names_changed: true } } }, 'zh')).toBeNull();
+    expect(hostDisplayOnlySaveMessage({ json: { decision: { status: 'UNCHANGED' } } }, 'zh')).toBeNull();
   });
 
   it('hostCanvasFromGraph derives depends_on from the canvas edges, including fan-in, not from stale cached step data', () => {
