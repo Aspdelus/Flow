@@ -127,6 +127,8 @@ import {
   loadHostRecoveryFailure,
   submitGateDecision,
   loadHostRunExecution,
+  loadHostEvidence,
+  type HostEvidence,
   hostNodeDetailText,
   hostPlanScopeRevision,
   loadHostRunInput,
@@ -247,6 +249,7 @@ function WorkflowPlaygroundSurface({
       enabled: !hostMode,
     });
   const [hostCanvas, setHostCanvas] = useState<HostCanvasDocument | null>(null);
+  const [hostEvidence, setHostEvidence] = useState<HostEvidence | null>(null);
   const [hostBusy, setHostBusy] = useState(false);
   // While a re-plan runs: the planning revision on screen, so only a newer
   // one's draft previews (see mergeHostDraftStep).
@@ -682,6 +685,24 @@ function WorkflowPlaygroundSurface({
     // Read again once the run moves on (approved, finished): it can then run again.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [hostMode, hostExecution?.status]);
+
+  // Evidence is a derived, read-only projection of the same RunStore, never a
+  // second execution/evaluation state owned by the canvas.
+  useEffect(() => {
+    setHostEvidence(null);
+    if (!hostMode?.runId) return;
+    let cancelled = false;
+    void loadHostEvidence(hostMode)
+      .then((evidence) => {
+        if (!cancelled) setHostEvidence(evidence);
+      })
+      .catch(() => {
+        if (!cancelled) setHostEvidence(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [hostMode?.baseUrl, hostMode?.runId]);
 
   useEffect(() => {
     if (!hostPlanning) {
@@ -2555,6 +2576,7 @@ function WorkflowPlaygroundSurface({
               ? hostCanvas.flow_status
               : undefined
         }
+        hostEvidence={hostEvidence}
         execution={
           viewExecution && isHostRunExecutionActive(viewExecution.status)
             ? {

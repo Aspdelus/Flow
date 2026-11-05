@@ -136,6 +136,12 @@ type PlaygroundHeaderProps = {
     completed: number;
     total: number | null;
   };
+  hostEvidence?: {
+    status: string;
+    outputs: Record<string, string>;
+    artifactCount: number;
+    criteriaCount: number;
+  } | null;
   /** Set while the run has no proposal yet because the orchestrator is
    * still planning: elapsed seconds, plus the latest host-derived planning
    * phase frame when the host sends them (`phase`: model/tool/finished). */
@@ -383,6 +389,7 @@ export function WorkflowPlaygroundHeader({
   hostFlowStatus,
   progress,
   execution,
+  hostEvidence,
   planning,
   hostBusy = false,
   onHostSave,
@@ -513,6 +520,25 @@ export function WorkflowPlaygroundHeader({
             }}
           >
             {executionLabel(execution, locale)}
+          </span>
+        ) : null}
+        {hostMode && hostEvidence ? (
+          <span
+            aria-live="polite"
+            data-testid="host-evidence-summary"
+            style={{
+              padding: '2px 9px',
+              borderRadius: 999,
+              background: 'var(--workflow-surface-muted)',
+              color: 'var(--workflow-muted)',
+              fontSize: 11,
+              fontWeight: 620,
+              whiteSpace: 'nowrap',
+            }}
+          >
+            {`Evaluation: ${hostEvidence.status} · ${hostEvidence.artifactCount} artifacts · ${Object.entries(hostEvidence.outputs)
+              .map(([stepId, text]) => `${stepId}: ${text}`)
+              .join(' · ')}`}
           </span>
         ) : null}
         {hostMode && onHostReviewGate ? (

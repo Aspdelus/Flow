@@ -85,6 +85,42 @@ describe('WorkflowPlayground host header: design notes, edit origin, re-plan', (
     expect(planNoteSeverityLabel(notes[0], 'en')).toBe('Structural');
   });
 
+  it('projects evaluation and delivered outputs without inventing empty evidence', () => {
+    const html = renderToStaticMarkup(
+      createElement(WorkflowPlaygroundHeader, {
+        ...baseProps,
+        hostEvidence: {
+          status: 'PASSED',
+          artifactCount: 4,
+          criteriaCount: 10,
+          outputs: { a: 'A', b: 'B', c: 'C', d: 'D' },
+        },
+      }),
+    );
+    expect(html).toContain('data-testid="host-evidence-summary"');
+    expect(html).toContain('Evaluation: PASSED · 4 artifacts · a: A · b: B · c: C · d: D');
+    const loading = renderToStaticMarkup(
+      createElement(WorkflowPlaygroundHeader, {
+        ...baseProps,
+        hostEvidence: null,
+      }),
+    );
+    expect(loading).not.toContain('data-testid="host-evidence-summary"');
+    const local = renderToStaticMarkup(
+      createElement(WorkflowPlaygroundHeader, {
+        ...baseProps,
+        hostMode: false,
+        hostEvidence: {
+          status: 'PASSED',
+          artifactCount: 1,
+          criteriaCount: 1,
+          outputs: { a: 'A' },
+        },
+      }),
+    );
+    expect(local).not.toContain('data-testid="host-evidence-summary"');
+  });
+
   it('says when a person edited the plan and offers re-planning only when asked to', () => {
     const edited = renderToStaticMarkup(
       createElement(WorkflowPlaygroundHeader, {

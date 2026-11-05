@@ -68,6 +68,7 @@ import {
   loadHostRunTaskText,
   loadHostRecoveryFailure,
   loadHostRunExecution,
+  loadHostEvidence,
   mintApprovalToken,
   mintRunId,
   pendingRunStart,
@@ -1579,6 +1580,20 @@ describe('WorkflowPlayground host mode', () => {
     expect(failed.nodeStatuses.done).toBe('error');
     expect(failed.nodeStatuses.a).toBe('error');
     expect(failed.failedStepCount).toBe(1);
+    const timedOut = hostRunExecutionFromSnapshot({
+      status: 'timed_out',
+      steps: {
+        'agent:a': { status: 'timed_out' },
+        'agent:b': { status: 'skipped' },
+      },
+    });
+    expect(timedOut.nodeStatuses).toMatchObject({
+      a: 'timedOut',
+      b: 'skipped',
+      done: 'timedOut',
+    });
+    expect(statusLabel('timed_out', 'zh')).toBe('已超时');
+    expect(statusLabel('unknown', 'zh')).toBe('状态未知');
     // Before any agent step is scheduled (still planning / awaiting approval)
     // nothing on the canvas is painted.
     expect(
@@ -1631,6 +1646,67 @@ describe('WorkflowPlayground host mode', () => {
       });
       expect(execution.runningStepIds).toEqual(['s1']);
       expect(fetchImpl).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('loadHostEvidence reads the same run projection and rejects unavailable evidence', async () => {
+    const config = {
+      baseUrl: 'http://127.0.0.1:9',
+      runId: 'run / 1',
+      tenantId: 'tenant-local-validation',
+      principalRef: 'reviewer@local',
+    };
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
+      expect(String(input)).toBe(
+        'http://127.0.0.1:9/v1/runs/run%20%2F%201/evidence',
+      );
+      return new Response(
+        JSON.stringify({
+          evaluation: { status: 'PASSED', criteria: Array(10).fill({}) },
+          artifact_manifest: { artifacts: Array(4).fill({}) },
+          outputs: [
+            ...['a', 'b', 'c', 'd'].map((step_id) => ({
+              step_id,
+              result: { outputs: { result: step_id.toUpperCase() } },
+            })),
+            { step_id: 7, result: { outputs: { result: 'ignored' } } },
+            { step_id: 'non-text', result: { outputs: { result: 9 } } },
+          ],
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      );
+    });
+    vi.stubGlobal('fetch', fetchImpl);
+    try {
+      expect(await loadHostEvidence(config)).toEqual({
+        status: 'PASSED',
+        outputs: { a: 'A', b: 'B', c: 'C', d: 'D' },
+        artifactCount: 4,
+        criteriaCount: 10,
+      });
+      expect(await loadHostEvidence({ ...config, runId: '' })).toBeNull();
+      expect(fetchImpl).toHaveBeenCalledTimes(1);
+      fetchImpl.mockImplementationOnce(
+        async () => new Response('unavailable', { status: 503 }),
+      );
+      await expect(loadHostEvidence(config)).rejects.toThrow(
+        'Evidence request failed: 503',
+      );
+      fetchImpl.mockImplementationOnce(
+        async () =>
+          new Response(JSON.stringify({}), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          }),
+      );
+      expect(await loadHostEvidence(config)).toEqual({
+        status: 'UNKNOWN',
+        outputs: {},
+        artifactCount: 0,
+        criteriaCount: 0,
+      });
     } finally {
       vi.unstubAllGlobals();
     }

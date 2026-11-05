@@ -725,6 +725,41 @@ export async function listHostRuns(
     .filter((run) => run.runId !== '');
 }
 
+/** The read-only evaluation and delivery projection served by the DAG host. */
+export type HostEvidence = {
+  status: string;
+  outputs: Record<string, string>;
+  artifactCount: number;
+  criteriaCount: number;
+};
+
+export async function loadHostEvidence(
+  config: HostModeConfig,
+): Promise<HostEvidence | null> {
+  if (!config.runId) return null;
+  const response = await fetch(
+    `${config.baseUrl}/v1/runs/${encodeURIComponent(config.runId)}/evidence`,
+  );
+  if (!response.ok) throw new Error(`Evidence request failed: ${response.status}`);
+  const body = await response.json() as {
+    evaluation?: { status?: string; criteria?: unknown[] } | null;
+    artifact_manifest?: { artifacts?: unknown[] } | null;
+    outputs?: Array<{ step_id?: string; result?: { outputs?: Record<string, string> } }>;
+  };
+  const outputs: Record<string, string> = {};
+  for (const node of body.outputs ?? []) {
+    if (typeof node.step_id !== 'string') continue;
+    const text = node.result?.outputs?.result;
+    if (typeof text === 'string') outputs[node.step_id] = text;
+  }
+  return {
+    status: body.evaluation?.status ?? 'UNKNOWN',
+    outputs,
+    artifactCount: body.artifact_manifest?.artifacts?.length ?? 0,
+    criteriaCount: body.evaluation?.criteria?.length ?? 0,
+  };
+}
+
 function isRecord(value: unknown): value is JsonObject {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
@@ -853,6 +888,8 @@ function nodeStatusFromFlowStepStatus(status: string): HostNodeRuntimeStatus {
       return 'error';
     case 'cancelled':
       return 'cancelled';
+    case 'skipped':
+      return 'skipped';
     case 'timed_out':
       return 'timedOut';
     case 'pending':
@@ -1133,6 +1170,7 @@ export function hostRunExecutionFromSnapshot(
   else if (outcome === 'refused') delete nodeStatuses.done;
   else if (status === 'completed') nodeStatuses.done = 'success';
   else if (status === 'failed') nodeStatuses.done = 'error';
+  else if (status === 'timed_out') nodeStatuses.done = 'timedOut';
   else if (status === 'cancelled') {
     // Nothing runs or waits in a cancelled run: what was still open stopped.
     for (const [nodeId, nodeStatus] of Object.entries(nodeStatuses)) {

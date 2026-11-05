@@ -18,6 +18,8 @@ const STATUS_LABEL: Readonly<Record<string, { zh: string; en: string }>> = {
   completed: { zh: '已完成', en: 'Completed' },
   failed: { zh: '失败', en: 'Failed' },
   cancelled: { zh: '已取消', en: 'Cancelled' },
+  timed_out: { zh: '已超时', en: 'Timed out' },
+  unknown: { zh: '状态未知', en: 'Unknown' },
   // Not Flow statuses: the run output's, for a run a reviewer rejected at a
   // gate, and for one whose task the planner refused (nothing ran).
   rejected_at_gate: { zh: '已驳回', en: 'Rejected' },
