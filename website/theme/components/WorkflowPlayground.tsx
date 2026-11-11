@@ -75,6 +75,7 @@ import {
   WorkflowPlaygroundInspector,
   type InspectorTab,
 } from './WorkflowPlaygroundInspector';
+import { WorkflowPlaygroundHostOutputs } from './WorkflowPlaygroundHostOutputs';
 import { WorkflowPlaygroundLibrary } from './WorkflowPlaygroundLibrary';
 import {
   runStatusShown,
@@ -2971,6 +2972,16 @@ function WorkflowPlaygroundSurface({
             }
             onRunNode={(nodeId) => void runNode(nodeId)}
             selectedNode={selectedNode}
+            hostOutputs={
+              hostMode?.runId && selectedNode ? (
+                <WorkflowPlaygroundHostOutputs
+                  hostMode={hostMode}
+                  locale={locale}
+                  nodeId={selectedNode.id}
+                  runStatus={hostExecution?.status}
+                />
+              ) : undefined
+            }
             hostStepEditor={
               hostMode &&
               selectedNode?.id === 'start' &&

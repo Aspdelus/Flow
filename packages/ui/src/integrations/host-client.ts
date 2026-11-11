@@ -9,6 +9,8 @@
  * - POST /v1/runs/{runId}/copilot
  * - GET  /v1/runs/{runId}/failure
  * - POST /v1/runs/{runId}/resume-after-failure
+ * - GET  /v1/runs/{runId}/artifacts
+ * - GET  /v1/runs/{runId}/artifacts/{digest}
  * - GET  /v1/runs/{runId}/progress
  * - GET  /v1/runs/{runId}
  * - GET  /v1/hooks/active
@@ -139,6 +141,17 @@ export type HostRunInputFile = {
   name: string;
   bytes: number;
   sha256: string;
+};
+
+export type HostRunArtifact = {
+  schema_version: 'host.run-artifact.v1';
+  run_id: string;
+  kind: 'step_output' | 'run_result' | string;
+  step_id?: string | null;
+  port?: string | null;
+  digest: string;
+  bytes: number;
+  media_type: string;
 };
 
 /** `POST /v1/runs` body that runs the workflow run `from_run` was approved
@@ -786,6 +799,41 @@ export class FlowHostClient {
       bytes: json.bytes,
       sha256: json.sha256,
     };
+  }
+
+  /** Stable URL of one complete output artifact. The host, not the browser,
+   * checks that this digest belongs to the run before returning its bytes. */
+  runArtifactUrl(runId: string, digest: string): string {
+    if (!runId.trim() || !/^sha256:[0-9a-f]{64}$/.test(digest)) {
+      throw new HostClientError('INVALID_INPUT: runId and a valid artifact digest are required');
+    }
+    return this.url(
+      `/v1/runs/${encodeURIComponent(runId)}/artifacts/${encodeURIComponent(digest)}`,
+    );
+  }
+
+  async listRunArtifacts(runId: string): Promise<HostRunArtifact[]> {
+    if (!runId.trim()) {
+      throw new HostClientError('INVALID_INPUT: runId is required');
+    }
+    const { json } = await this.request(
+      'GET',
+      `/v1/runs/${encodeURIComponent(runId)}/artifacts`,
+    );
+    const artifacts = (json as { artifacts?: unknown })?.artifacts;
+    if (!Array.isArray(artifacts)) {
+      throw new HostClientError('INVALID_INPUT: artifact list response is malformed');
+    }
+    return artifacts.filter((artifact): artifact is HostRunArtifact => {
+      if (artifact === null || typeof artifact !== 'object') return false;
+      const item = artifact as Record<string, unknown>;
+      return (
+        typeof item.digest === 'string' &&
+        typeof item.bytes === 'number' &&
+        typeof item.media_type === 'string' &&
+        item.run_id === runId
+      );
+    });
   }
 
   /**

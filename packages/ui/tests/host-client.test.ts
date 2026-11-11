@@ -198,6 +198,35 @@ describe('FlowHostClient', () => {
     await expect(refusing(200, { name: 'x', bytes: 1, sha256: 's' }).putRunInput('run-1', 'x', 'x', new Blob(['x']))).rejects.toThrow('malformed');
   });
 
+  it('lists run artifacts and builds a digest-checked download URL', async () => {
+    const digest = `sha256:${'a'.repeat(64)}`;
+    const artifact = {
+      schema_version: 'host.run-artifact.v1',
+      run_id: 'run/一',
+      kind: 'step_output',
+      step_id: 'report',
+      bytes: 1234,
+      digest,
+      media_type: 'text/markdown; charset=utf-8',
+    };
+    const fetchImpl = vi.fn(async () =>
+      new Response(JSON.stringify({ artifacts: [artifact, { ...artifact, run_id: 'other' }, { bad: true }] }), { status: 200 }),
+    );
+    const client = new FlowHostClient({
+      baseUrl: 'http://127.0.0.1:9/',
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    });
+    await expect(client.listRunArtifacts('run/一')).resolves.toEqual([artifact]);
+    expect(fetchImpl).toHaveBeenCalledWith(
+      `http://127.0.0.1:9/v1/runs/${encodeURIComponent('run/一')}/artifacts`,
+      expect.objectContaining({ method: 'GET' }),
+    );
+    expect(client.runArtifactUrl('run/一', digest)).toBe(
+      `http://127.0.0.1:9/v1/runs/${encodeURIComponent('run/一')}/artifacts/${encodeURIComponent(digest)}`,
+    );
+    expect(() => client.runArtifactUrl('run/一', '../../secret')).toThrow('valid artifact digest');
+  });
+
   it('runs an approved workflow again through POST /v1/runs with from_run (W31)', async () => {
     let sent: Record<string, unknown> = {};
     const client = new FlowHostClient({
